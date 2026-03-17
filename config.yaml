@@ -1,0 +1,64 @@
+data:
+  raw_dir: ./Data/raw
+  sample_dir: ./Data/user_posts       # for dev work before full download
+  conflict_window: ["2023-10-01", "2024-03-18"]
+  cascade_min_size: 10                # adjusted empirically; fallback to 5
+  cascade_max_size: 10000
+
+nlp_filter:
+  keyword_tiers: [1, 2, 3, 4, 5]     # all tiers active by default
+  use_sample_dir: true                # set false to stream from raw_dir/user_posts.tar.gz
+  sample_files: 3                     # for validate_filter stage
+  validation_sample_n: 200
+  batch_write_every: 10               # write parquet every N files processed
+
+cascade:
+  parent_priority: [follower, temporal, root]
+  edge_types: {FOLLOWER: 0, NON_FOLLOWER: 1, UNKNOWN: 2}
+  follower_db_path: ./Data/followers.duckdb   # pre-built DuckDB from followers.csv.gz
+
+model:
+  encoder: rgcn                       # options: rgcn | gcn (ablation A1)
+  rgcn_bases: 2
+  rgcn_layers: 3
+  rgcn_dropout: 0.3
+  input_dim: 6                        # temporal + sent_label + sent_score + depth + in_deg + out_deg
+  hidden_dim: 128
+  embedding_dim: 64
+  pool: diffpool                      # options: diffpool | mean (ablation A3)
+  pool_ratios: [0.5, 0.25]
+  diffpool_aux_weight: 0.1
+  diffpool_max_nodes: 1000            # cap for DiffPool memory; larger cascades use SAGPool
+  use_sentiment: true                 # set false for ablation A4
+
+augmentation:
+  strategy: feed_aware                # options: feed_aware | random (ablation A2)
+  follower_retain_ratio: 0.7
+  temporal_prefix_ratio: 0.6
+  bridge_remove_ratio: 0.3
+  min_nodes_after_aug: 3             # guard: re-augment if result has < this many nodes
+  hard_negatives: true
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-3
+  lr_schedule: cosine                 # options: cosine | constant
+  lr_min: 1.0e-5
+  warmup_epochs: 5
+  temperature: 0.5                    # InfoNCE tau; swept over [0.1, 0.3, 0.5, 0.7]
+  grad_clip_norm: 1.0
+  checkpoint_every: 10               # epochs between checkpoints
+  log_grad_norm_every: 50            # batches between gradient norm logs
+
+clustering:
+  min_cluster_size_grid: [50, 100, 200]
+  min_samples: null                   # null = same as min_cluster_size
+  umap_n_components: 2
+  umap_n_neighbors: 15
+  umap_min_dist: 0.1
+
+evaluation:
+  bootstrap_n: 1000
+  stability_subsamples: 10
+  stability_ratio: 0.8

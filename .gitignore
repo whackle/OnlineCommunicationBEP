@@ -1,0 +1,33 @@
+# Data
+Data/
+
+# Pipeline outputs
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Weights & Biases
+wandb/
+
+# Model checkpoints (track only final best.pt via Git LFS if needed)
+*.pt
+*.h5
+*.hdf5

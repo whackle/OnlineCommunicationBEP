@@ -1,0 +1,37 @@
+# Core ML (CPU-only — no NVIDIA GPU on dev machine)
+# Install torch first, then torch-scatter from PyG wheel server:
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
+torch==2.10.0
+torch-geometric==2.7.0
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+
+# Data
+duckdb==1.5.0
+pyarrow==23.0.1
+pandas==2.2.3
+
+# Config + CLI
+pyyaml==6.0.2
+click==8.1.8
+
+# Clustering + dimensionality reduction
+hdbscan==0.8.40
+scikit-learn==1.6.1
+umap-learn==0.5.7
+
+# Visualisation + progress
+matplotlib==3.10.1
+seaborn==0.13.2
+tqdm==4.67.1
+rich==14.0.0
+
+# Evaluation
+scipy==1.15.3
+
+# Experiment tracking (optional, can be skipped if offline)
+# wandb==0.19.10
+
+# Testing
+pytest==8.3.5
