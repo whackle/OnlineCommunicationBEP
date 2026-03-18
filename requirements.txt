@@ -1,7 +1,14 @@
-# Core ML (CPU-only — no NVIDIA GPU on dev machine)
-# Install torch first, then torch-scatter from PyG wheel server:
+# Core ML
+# torch-scatter/torch-sparse must be installed AFTER torch — they build against it.
+# Do NOT use `pip install -r requirements.txt` directly. Use install.sh instead.
+#
+# CPU (dev):
 #   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-#   pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
+#   pip install torch-scatter torch-sparse torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
+#
+# GPU (VM, CUDA 12.4):
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch-scatter torch-sparse torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cu124.html
 torch==2.10.0
 torch-geometric==2.7.0
 torch-scatter==2.1.2
