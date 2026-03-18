@@ -84,13 +84,37 @@ def run(
     ckpt_every = tcfg.get("checkpoint_every", 10)
     log_grad_every = tcfg.get("log_grad_norm_every", 50)
 
-    # ── 6. Training loop ─────────────────────────────────────────────────
-    print(f"[train] epochs={epochs}  batch_size={batch_size}  lr={lr}  τ={temperature}")
-    log: list[dict] = []
+    # ── 6. Early stopping + resume setup ────────────────────────────────
+    patience = tcfg.get("early_stopping_patience", 15)
+    min_delta = tcfg.get("early_stopping_min_delta", 1e-4)
+
+    # Resume from last.pt if it exists (e.g. after a crash / VM preemption)
+    start_epoch = 1
     best_loss = float("inf")
+    epochs_without_improvement = 0
+    log: list[dict] = []
+
+    last_ckpt = ckpt_dir / "last.pt"
+    if last_ckpt.exists():
+        print(f"[train] Resuming from {last_ckpt}")
+        ckpt = torch.load(last_ckpt, weights_only=False, map_location=dev)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+        epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
+        log = ckpt.get("log", [])
+        print(f"[train] Resumed at epoch {start_epoch}, best_loss={best_loss:.4f}")
+
+    # ── 7. Training loop ─────────────────────────────────────────────────
+    print(f"[train] epochs={epochs}  batch_size={batch_size}  lr={lr}  "
+          f"τ={temperature}  patience={patience}")
     t_start = time.time()
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_loss = 0.0
         epoch_contrast = 0.0
@@ -140,7 +164,6 @@ def run(
 
         # LR schedule (with warmup)
         if epoch <= warmup:
-            # Linear warmup
             warmup_lr = lr * epoch / warmup
             for pg in optimizer.param_groups:
                 pg["lr"] = warmup_lr
@@ -171,18 +194,37 @@ def run(
                 f"lr={current_lr:.2e}  grad={epoch_log['grad_norm_mean']:.3f}"
             )
 
-        # Checkpoint
-        if avg_loss < best_loss:
+        # ── Best model checkpoint ────────────────────────────────────────
+        if avg_loss < best_loss - min_delta:
             best_loss = avg_loss
+            epochs_without_improvement = 0
             _save_checkpoint(model, optimizer, epoch, avg_loss, ckpt_dir / "best.pt")
+        else:
+            epochs_without_improvement += 1
 
+        # ── Periodic checkpoint ──────────────────────────────────────────
         if epoch % ckpt_every == 0:
             _save_checkpoint(
                 model, optimizer, epoch, avg_loss,
                 ckpt_dir / f"epoch_{epoch}.pt",
             )
 
-    # ── 7. Save final artefacts ──────────────────────────────────────────
+        # ── Always save last.pt (crash recovery) ────────────────────────
+        _save_resumable(
+            model, optimizer, scheduler, epoch, avg_loss,
+            best_loss, epochs_without_improvement, log,
+            last_ckpt,
+        )
+
+        # ── Early stopping ───────────────────────────────────────────────
+        if epochs_without_improvement >= patience:
+            print(
+                f"[train] Early stopping at epoch {epoch} — "
+                f"no improvement for {patience} epochs (best={best_loss:.4f})"
+            )
+            break
+
+    # ── 8. Save final artefacts ──────────────────────────────────────────
     elapsed = time.time() - t_start
     print(f"[train] Done in {elapsed / 60:.1f} min.  Best loss: {best_loss:.4f}")
 
@@ -232,6 +274,22 @@ def _build_augmentor(acfg: dict):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _save_resumable(model, optimizer, scheduler, epoch, loss, best_loss,
+                    epochs_without_improvement, log, path):
+    """Save full training state for crash recovery."""
+    state = {
+        "epoch": epoch,
+        "loss": loss,
+        "best_loss": best_loss,
+        "epochs_without_improvement": epochs_without_improvement,
+        "log": log,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+    }
+    torch.save(state, path)
 
 
 def _save_checkpoint(model, optimizer, epoch, loss, path):
