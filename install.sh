@@ -27,15 +27,9 @@ echo "[install] torch ${TORCH_VER} installed"
 
 PYG_INDEX="https://data.pyg.org/whl/torch-${TORCH_VER}+${WHEEL}.html"
 
-# Step 3: PyG extensions — use pre-built wheels, no source compilation
-echo "[install] Installing torch-scatter, torch-sparse, torch-geometric..."
-pip install torch-scatter torch-sparse torch-geometric \
-    --find-links "$PYG_INDEX" --no-index \
-    || {
-        echo "[install] Pre-built wheels not found, falling back to PyPI index..."
-        pip install torch-scatter torch-sparse torch-geometric \
-            -f "$PYG_INDEX" --no-build-isolation
-    }
+# Step 3: torch-geometric (torch-scatter/torch-sparse not needed for PyG 2.4+)
+echo "[install] Installing torch-geometric..."
+pip install torch-geometric
 
 # Step 4: everything else
 echo "[install] Installing remaining dependencies..."
