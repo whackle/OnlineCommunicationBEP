@@ -98,7 +98,8 @@ def run(
         n_batches = 0
         grad_norms: list[float] = []
 
-        for batch_idx, batch in enumerate(loader):
+        pbar = tqdm(loader, desc=f"epoch {epoch:>3}/{epochs}", unit="batch", leave=False)
+        for batch_idx, batch in enumerate(pbar):
             # Generate two augmented views per cascade in this batch
             originals = batch.to_data_list()
             view1_list, view2_list = [], []
@@ -133,6 +134,9 @@ def run(
 
             if batch_idx % log_grad_every == 0:
                 grad_norms.append(gn.item() if isinstance(gn, torch.Tensor) else gn)
+
+            # Update progress bar
+            pbar.set_postfix(loss=f"{loss.item():.3f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
         # LR schedule (with warmup)
         if epoch <= warmup:
