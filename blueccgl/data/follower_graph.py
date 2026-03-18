@@ -90,31 +90,61 @@ class FollowerGraph:
     def conn(self) -> duckdb.DuckDBPyConnection:
         return self._ensure_db()
 
+    def preload_for_users(self, user_ids: set[int]) -> None:
+        """
+        Load all follower edges involving `user_ids` into an in-memory set.
+        After calling this, `follows()` uses the in-memory cache — no more
+        per-lookup DB queries. Call this once before bulk tree building.
+        """
+        self._ensure_columns()
+        print(f"[follower_graph] Preloading edges for {len(user_ids):,} users...")
+        conn = self.conn
+        # Create temp table of user IDs, then join — much faster than a giant IN clause
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _cascade_users (uid BIGINT)")
+        conn.execute("DELETE FROM _cascade_users")
+        conn.executemany("INSERT INTO _cascade_users VALUES (?)", [[u] for u in user_ids])
+        rows = conn.execute(f"""
+            SELECT f.{self._follower_col}, f.{self._followed_col}
+            FROM followers f
+            JOIN _cascade_users u ON f.{self._follower_col} = u.uid
+        """).fetchall()
+        self._cache: set[tuple[int, int]] = set(rows)
+        print(f"[follower_graph] Preloaded {len(self._cache):,} relevant edges into memory")
+
     def follows(self, follower_uid: int, followed_uid: int) -> bool:
         """Returns True if follower_uid follows followed_uid."""
-        if not hasattr(self, "_follower_col"):
-            # Detect column names from existing DB
-            cols = [row[0] for row in self.conn.execute("DESCRIBE followers").fetchall()]
-            if "follower" in cols:
-                self._follower_col = "follower"
-                self._followed_col = "followed"
-            elif "source" in cols:
-                self._follower_col = "source"
-                self._followed_col = "target"
-            else:
-                self._follower_col = cols[0]
-                self._followed_col = cols[1]
+        # Use in-memory cache if preloaded
+        if hasattr(self, "_cache"):
+            return (follower_uid, followed_uid) in self._cache
 
+        self._ensure_columns()
         result = self.conn.execute(
             f"SELECT 1 FROM followers WHERE {self._follower_col} = ? AND {self._followed_col} = ? LIMIT 1",
             [follower_uid, followed_uid],
         ).fetchone()
         return result is not None
 
+    def _ensure_columns(self) -> None:
+        if hasattr(self, "_follower_col"):
+            return
+        cols = [row[0] for row in self.conn.execute("DESCRIBE followers").fetchall()]
+        if "follower" in cols and "followed" in cols:
+            self._follower_col = "follower"
+            self._followed_col = "followed"
+        elif "source" in cols and "target" in cols:
+            self._follower_col = "source"
+            self._followed_col = "target"
+        else:
+            self._follower_col = cols[0]
+            self._followed_col = cols[1]
+
     def both_exist(self, uid_a: int, uid_b: int) -> bool:
         """Check if both users appear anywhere in the follower graph."""
-        if not hasattr(self, "_follower_col"):
-            self.follows(0, 0)  # trigger column detection
+        if hasattr(self, "_cache"):
+            # Check cache: either user appears as follower in any edge
+            return any(uid_a == f or uid_a == t for f, t in self._cache) and \
+                   any(uid_b == f or uid_b == t for f, t in self._cache)
+        self._ensure_columns()
         result = self.conn.execute(f"""
             SELECT 1 FROM followers
             WHERE {self._follower_col} = ? OR {self._followed_col} = ?

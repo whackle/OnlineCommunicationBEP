@@ -106,17 +106,6 @@ def main():
                     continue
 
                 window_posts += 1
-
-            # File-level progress (prints every 100 files)
-            if files_done % 100 == 0:
-                elapsed = time.time() - t0
-                print(
-                    f"  files={files_done:,}  "
-                    f"posts={total_posts:,}  "
-                    f"in_window={window_posts:,}  "
-                    f"elapsed={elapsed:.0f}s",
-                    flush=True,
-                )
                 batch.append({
                     "post_id":         post.get("post_id"),
                     "user_id":         post.get("user_id"),
@@ -139,6 +128,17 @@ def main():
                         f"elapsed={elapsed:.0f}s",
                         flush=True,
                     )
+
+            # File-level progress (prints every 100 files)
+            if files_done % 100 == 0:
+                elapsed = time.time() - t0
+                print(
+                    f"  files={files_done:,}  "
+                    f"posts={total_posts:,}  "
+                    f"in_window={window_posts:,}  "
+                    f"elapsed={elapsed:.0f}s",
+                    flush=True,
+                )
 
     _flush(writer, batch)
     writer.close()

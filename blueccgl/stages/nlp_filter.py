@@ -15,6 +15,8 @@ Writes:
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import os
 import re
 import tarfile
 from pathlib import Path
@@ -45,6 +47,7 @@ _SCHEMA = pa.schema([
 ])
 
 _BATCH_SIZE = 10_000  # rows buffered before writing to parquet
+_FILE_BATCH = 64      # files sent to each worker at once
 
 
 def run(cfg: dict, output_dir: Path) -> None:
@@ -63,8 +66,8 @@ def run(cfg: dict, output_dir: Path) -> None:
         file_iter   = _iter_sample_dir(sample_dir)
         total_files = len(list(sample_dir.glob("*.jsonl")))
         mode_label  = f"sample ({sample_dir})"
+        n_workers   = 1  # sample is small, no need for parallelism
     else:
-        # Try raw_dir first, then Data/ directly (user may not have a raw/ subdir)
         tar_path = Path(cfg["data"]["raw_dir"]) / "user_posts.tar.gz"
         if not tar_path.exists():
             tar_path = Path("Data") / "user_posts.tar.gz"
@@ -77,8 +80,10 @@ def run(cfg: dict, output_dir: Path) -> None:
         file_iter   = _iter_tar(tar_path)
         total_files = None  # unknown until we scan
         mode_label  = f"tar ({tar_path})"
+        n_workers   = max(1, (os.cpu_count() or 4) - 1)
 
     print(f"[nlp_filter] Mode: {mode_label}")
+    print(f"[nlp_filter] Workers: {n_workers}")
     print(f"[nlp_filter] Output: {parquet_path}")
 
     writer = None
@@ -92,72 +97,76 @@ def run(cfg: dict, output_dir: Path) -> None:
         "by_tier": {},
     }
 
-    batch: list[dict] = []
+    row_buffer: list[dict] = []
 
-    def flush_batch() -> None:
+    def flush_buffer() -> None:
         nonlocal writer
-        if not batch:
+        if not row_buffer:
             return
-        table = pa.table(_batch_to_arrays(batch), schema=_SCHEMA)
+        table = pa.table(_batch_to_arrays(row_buffer), schema=_SCHEMA)
         if writer is None:
             writer = pq.ParquetWriter(parquet_path, _SCHEMA)
         writer.write_table(table)
-        batch.clear()
+        row_buffer.clear()
+
+    def apply_stats(batch_stats: dict) -> None:
+        stats["total_posts_scanned"]    += batch_stats["total"]
+        stats["posts_in_conflict_window"] += batch_stats["in_window"]
+        stats["conflict_posts"]         += batch_stats["conflict"]
+        stats["malformed_lines"]        += batch_stats["malformed"]
+        for ev, cnt in batch_stats["by_event"].items():
+            stats["by_event"][ev] = stats["by_event"].get(ev, 0) + cnt
+        for tier, cnt in batch_stats["by_tier"].items():
+            stats["by_tier"][tier] = stats["by_tier"].get(tier, 0) + cnt
 
     with tqdm(total=total_files, unit="file", desc="nlp_filter") as pbar:
-        for fname, lines in file_iter:
-            stats["files_processed"] += 1
-            pbar.set_postfix({"conflict": stats["conflict_posts"]}, refresh=False)
-            pbar.update(1)
+        if n_workers <= 1:
+            # Single-process path (sample mode or 1 CPU)
+            for fname, lines in file_iter:
+                stats["files_processed"] += 1
+                pbar.set_postfix({"conflict": stats["conflict_posts"]}, refresh=False)
+                pbar.update(1)
+                batch_stats, rows = _process_lines(lines)
+                apply_stats(batch_stats)
+                row_buffer.extend(rows)
+                if len(row_buffer) >= _BATCH_SIZE:
+                    flush_buffer()
+                if stats["files_processed"] % batch_every == 0:
+                    flush_buffer()
+        else:
+            # Multi-process path (tar mode)
+            with mp.Pool(n_workers) as pool:
+                pending_file_batch: list[list[str]] = []
 
-            for line in lines:
-                stats["total_posts_scanned"] += 1
-                post = _safe_parse(line)
-                if post is None:
-                    stats["malformed_lines"] += 1
-                    continue
+                for fname, lines in file_iter:
+                    stats["files_processed"] += 1
+                    pending_file_batch.append(lines)
 
-                dt = parse_date(post.get("date"))
-                if dt is None or not in_conflict_window(dt):
-                    continue
-                stats["posts_in_conflict_window"] += 1
+                    if len(pending_file_batch) >= _FILE_BATCH * n_workers:
+                        # Ship to workers
+                        results = pool.map(
+                            _process_lines,
+                            pending_file_batch,
+                            chunksize=_FILE_BATCH,
+                        )
+                        pending_file_batch = []
+                        for batch_stats, rows in results:
+                            apply_stats(batch_stats)
+                            row_buffer.extend(rows)
+                        pbar.set_postfix({"conflict": stats["conflict_posts"]}, refresh=False)
+                        pbar.update(len(results))
+                        if len(row_buffer) >= _BATCH_SIZE:
+                            flush_buffer()
 
-                text = post.get("text") or ""
-                if not text or not is_conflict(text):
-                    continue
+                # Drain remainder
+                if pending_file_batch:
+                    results = pool.map(_process_lines, pending_file_batch, chunksize=_FILE_BATCH)
+                    for batch_stats, rows in results:
+                        apply_stats(batch_stats)
+                        row_buffer.extend(rows)
+                    pbar.update(len(results))
 
-                event = assign_event(dt)
-                if event is None:
-                    continue
-
-                kw = match_keywords(text)
-                stats["conflict_posts"] += 1
-                stats["by_event"][event] = stats["by_event"].get(event, 0) + 1
-                for tier in kw:
-                    stats["by_tier"][tier] = stats["by_tier"].get(tier, 0) + 1
-
-                batch.append({
-                    "post_id":                   post.get("post_id"),
-                    "user_id":                   post.get("user_id"),
-                    "timestamp":                 dt,
-                    "text":                      text,
-                    "langs":                     post.get("langs") or [],
-                    "sent_label":                post.get("sent_label"),
-                    "sent_score":                post.get("sent_score"),
-                    "is_repost":                 post.get("repost_from") is not None,
-                    "repost_from":               post.get("repost_from"),
-                    "reposted_author":           post.get("reposted_author"),
-                    "conflict_keywords_matched": json.dumps(kw),
-                    "event_window":              event,
-                })
-
-                if len(batch) >= _BATCH_SIZE:
-                    flush_batch()
-
-            if stats["files_processed"] % batch_every == 0:
-                flush_batch()
-
-    flush_batch()
+    flush_buffer()
     if writer:
         writer.close()
 
@@ -170,6 +179,58 @@ def run(cfg: dict, output_dir: Path) -> None:
     _print_summary(stats_sorted, parquet_path)
 
 
+# ── Worker function (module-level so it's picklable) ─────────────────────────
+
+def _process_lines(lines: list[str]) -> tuple[dict, list[dict]]:
+    """Process a list of JSONL lines. Returns (stats_dict, rows)."""
+    batch_stats = {"total": 0, "in_window": 0, "conflict": 0, "malformed": 0,
+                   "by_event": {}, "by_tier": {}}
+    rows: list[dict] = []
+
+    for line in lines:
+        batch_stats["total"] += 1
+        post = _safe_parse(line)
+        if post is None:
+            batch_stats["malformed"] += 1
+            continue
+
+        dt = parse_date(post.get("date"))
+        if dt is None or not in_conflict_window(dt):
+            continue
+        batch_stats["in_window"] += 1
+
+        text = post.get("text") or ""
+        if not text or not is_conflict(text):
+            continue
+
+        event = assign_event(dt)
+        if event is None:
+            continue
+
+        kw = match_keywords(text)
+        batch_stats["conflict"] += 1
+        batch_stats["by_event"][event] = batch_stats["by_event"].get(event, 0) + 1
+        for tier in kw:
+            batch_stats["by_tier"][tier] = batch_stats["by_tier"].get(tier, 0) + 1
+
+        rows.append({
+            "post_id":                   post.get("post_id"),
+            "user_id":                   post.get("user_id"),
+            "timestamp":                 dt,
+            "text":                      text,
+            "langs":                     post.get("langs") or [],
+            "sent_label":                post.get("sent_label"),
+            "sent_score":                post.get("sent_score"),
+            "is_repost":                 post.get("repost_from") is not None,
+            "repost_from":               post.get("repost_from"),
+            "reposted_author":           post.get("reposted_author"),
+            "conflict_keywords_matched": json.dumps(kw),
+            "event_window":              event,
+        })
+
+    return batch_stats, rows
+
+
 # ── I/O helpers ──────────────────────────────────────────────────────────────
 
 def _iter_sample_dir(sample_dir: Path) -> Generator[tuple[str, list[str]], None, None]:
@@ -179,8 +240,9 @@ def _iter_sample_dir(sample_dir: Path) -> Generator[tuple[str, list[str]], None,
 
 
 def _iter_tar(tar_path: Path) -> Generator[tuple[str, list[str]], None, None]:
-    with tarfile.open(tar_path, "r:gz") as tf:
-        for member in tf.getmembers():
+    """Stream tar members sequentially using r|gz (no upfront index scan, no seeking)."""
+    with tarfile.open(tar_path, "r|gz") as tf:
+        for member in tf:
             if not member.name.endswith(".jsonl"):
                 continue
             f = tf.extractfile(member)

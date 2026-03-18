@@ -59,14 +59,19 @@ def main(config_path, output_dir, stages, dry_run, resume, seed, ablation, devic
             if "=" not in kv:
                 raise click.BadParameter(f"Override must be KEY=VALUE, got: {kv}")
             k, v = kv.split("=", 1)
-            # Attempt numeric cast
-            try:
-                v = int(v)
-            except ValueError:
+            # Attempt type cast: bool → int → float → str
+            if v.lower() == "true":
+                v = True
+            elif v.lower() == "false":
+                v = False
+            else:
                 try:
-                    v = float(v)
+                    v = int(v)
                 except ValueError:
-                    pass
+                    try:
+                        v = float(v)
+                    except ValueError:
+                        pass
             parsed[k] = v
         cfg = apply_overrides(cfg, parsed)
 

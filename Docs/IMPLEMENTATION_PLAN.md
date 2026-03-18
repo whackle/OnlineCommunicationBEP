@@ -1,15 +1,27 @@
 # BlueCCGL — Full Implementation Plan
 
-## Current State Assessment (Starting Point)
+## Current State Assessment (Updated 2025-03-17)
 
 | Asset | Status |
 |-------|--------|
-| **Sample data** | 100 JSONL files from `user_posts.tar.gz` (~15 MB, ~25K posts across 100 users) in `Data/user_posts/` |
-| **Full data** | Not yet downloaded. Need: `user_posts.tar.gz` (19.5 GB), `interactions.csv.gz` (1 GB), `graphs.tar.gz` (891 MB), `followers.csv.gz` (491 MB), `feed_posts.tar.gz` (16.4 MB), `feed_bookmarks.csv` (553 KB) |
-| **EDA script** | `scripts/eda_user_posts.py` — standalone EDA with keyword tiers, event windows, conflict matching. **Not yet integrated into pipeline.** |
-| **Environment** | Python 3.14 venv (empty — no packages installed yet) |
-| **Docs** | Project plan (`Docs/Palestine_Bluesky_Project_Plan.md`), system prompt (`prompts/system_prompt.md`), LaTeX proposal draft |
-| **Pipeline** | Does not exist yet. `run_pipeline.py` and `config.yaml` need to be created from scratch |
+| **Sample data** | 100 JSONL files (~15 MB, ~25K posts) in `Data/user_posts/` |
+| **Full data — user_posts.tar.gz** | Downloaded (19 GB, 2,363,249 JSONL files, ~4M posts, 128 GB uncompressed). In `Data/user_posts.tar.gz` |
+| **Full data — followers.csv.gz** | Downloaded (469 MB, ~144M edges). In `Data/followers.csv.gz` |
+| **Full data — others** | NOT downloaded: `interactions.csv.gz` (1 GB), `graphs.tar.gz` (891 MB), `feed_posts.tar.gz` (16.4 MB), `feed_bookmarks.csv` (553 KB). **Not needed for current cascade construction approach** — we use `repost_from`/`reposted_author` fields from user_posts instead |
+| **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
+| **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml` + 12 stage stubs. Stages `nlp_filter` and `cascade_construction` are implemented |
+| **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
+
+### Progress Summary
+
+| Sprint | Status | Notes |
+|--------|--------|-------|
+| Sprint 1: Scaffolding | DONE | All package structure, CLI, config, pipeline orchestrator, seed, gitignore |
+| Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
+| Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
+| Sprint 4: PyG Dataset + Model | NOT STARTED | Next up |
+| Sprint 5: Full Data Integration | DONE through cascade construction | All data sources consumed |
 
 ---
 
@@ -654,88 +666,123 @@ Not a code phase, but the pipeline should support it:
 
 Since only the 100 sample `user_posts` JSONL files are available, here is the prioritised sequence of work:
 
-### Sprint 1: Scaffolding (do first)
+### Sprint 1: Scaffolding — DONE
 
-| # | Task | Deliverable |
-|---|------|-------------|
-| 1 | Resolve Python version (3.14 may lack PyTorch wheels) | Working venv with PyTorch + PyG |
-| 2 | Create `blueccgl/` package structure | Empty `__init__.py` files, directory tree |
-| 3 | Create `config.yaml` with all defaults | Config file |
-| 4 | Create `run_pipeline.py` with stage orchestration | CLI entry point, `--dry-run` works |
-| 5 | Create `blueccgl/config.py` (YAML + CLI merge) | Config loader |
-| 6 | Create `blueccgl/pipeline.py` (dependency graph, resume) | Pipeline orchestrator |
-| 7 | Create `blueccgl/seed.py` | RNG seeding |
-| 8 | Update `.gitignore` | Ignore large files |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 1 | Resolve Python version | DONE | Python 3.14 works. CPU-only torch 2.10.0 + PyG 2.7.0 from PyG wheel server |
+| 2 | Create `blueccgl/` package structure | DONE | |
+| 3 | Create `config.yaml` with all defaults | DONE | |
+| 4 | Create `run_pipeline.py` with stage orchestration | DONE | Click CLI with `--set KEY=VALUE` overrides (bool casting fixed) |
+| 5 | Create `blueccgl/config.py` | DONE | YAML + CLI merge with dot-path overrides |
+| 6 | Create `blueccgl/pipeline.py` | DONE | 12-stage dependency graph, resume logic, dry-run |
+| 7 | Create `blueccgl/seed.py` | DONE | |
+| 8 | Update `.gitignore` | DONE | `Data/` entirely ignored |
 
-### Sprint 2: NLP Filter on Sample (validates pipeline + keywords)
+### Sprint 2: NLP Filter — DONE (tasks 14–15 deferred)
 
-| # | Task | Deliverable |
-|---|------|-------------|
-| 9 | Create `blueccgl/data/keywords.py` | Keyword module |
-| 10 | Create `blueccgl/data/events.py` | Event window module |
-| 11 | Create `blueccgl/stages/nlp_filter.py` | NLP filter stage |
-| 12 | Run `--stage nlp_filter` on sample data | `outputs/nlp_filter/conflict_posts.parquet` |
-| 13 | Inspect results: conflict post count, event distribution, keyword hits | Sanity check |
-| 14 | Create `blueccgl/stages/validate_filter.py` | Validation sample generator |
-| 15 | Manual precision check on ~50 matched posts | Keyword list refinement |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 9 | Create `blueccgl/data/keywords.py` | DONE | 5 tiers, 68 patterns. Co-occurrence gate for "hostage". "gallant" excluded |
+| 10 | Create `blueccgl/data/events.py` | DONE | E1–E6 + baseline. `parse_date()` handles 8/10/12-digit formats |
+| 11 | Create `blueccgl/stages/nlp_filter.py` | DONE | `r\|gz` streaming + 15-worker multiprocessing. 95 → 500 files/sec |
+| 12 | Run `--stage nlp_filter` on sample | DONE | 137 conflict posts / 25,509 scanned (0.54%) |
+| 13 | Inspect results | DONE | `scripts/quick_look.py` for easy inspection |
+| 14 | Create validate_filter stage | DEFERRED | Stub exists. Skipped — text quality looked good in manual spot-check of sample |
+| 15 | Manual precision check on ~50 posts | DEFERRED | Skipped — note as limitation in thesis |
+| — | Run `--stage nlp_filter` on full tar | DONE | 1,947,493 conflict posts from 233M (0.84%), 85 min |
 
-### Sprint 3: Cascade Construction on Sample (validates tree-building logic)
+### Sprint 3: Cascade Construction — DONE
 
-| # | Task | Deliverable |
-|---|------|-------------|
-| 16 | Create `blueccgl/data/cascade_builder.py` | Parent assignment + edge-type logic |
-| 17 | Create `blueccgl/stages/cascade_construction.py` | Cascade construction stage |
-| 18 | **Note:** Without `followers.csv.gz` and `interactions.csv.gz`, cascade construction can only run in a *degraded mode* using `repost_from` / `reposted_author` fields within `user_posts` + all edges marked UNKNOWN | Partial cascade test |
-| 19 | Verify: cascade tree validity, size distribution from sample | Sanity check |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 16 | Create `blueccgl/data/cascade_builder.py` | DONE | P1/P2/P3 parent heuristic, edge-type labelling. 7/7 unit tests passing |
+| 17 | Create `blueccgl/stages/cascade_construction.py` | DONE | Reposter discovery via `conflict_window_posts.parquet`. Follower path fallback fixed to check `Data/followers.csv.gz` |
+| 18 | Create `blueccgl/data/follower_graph.py` | DONE | DuckDB-backed. Auto-builds index from `followers.csv.gz`. `preload_for_users()` added for bulk in-memory lookups (9 roots/sec → 350K roots/sec) |
+| 19 | Create `scripts/extract_conflict_window.py` | DONE | Streams tar, extracts lean parquet (172M rows, 2.4 GB) |
+| — | Run cascade construction on full data | DONE | 39,983 cascades, 844,849 edges, 75.9% FOLLOWER-typed |
 
-### Sprint 4: PyG Dataset + Model Skeleton
+**Full cascade construction results (2025-03-17):**
+- Cascades built: **39,983** (≥10 nodes)
+- Total edges: 844,849 — Total nodes: 884,832
+- FOLLOWER: 641,139 (75.9%) — NON_FOLLOWER: 203,710 (24.1%) — UNKNOWN: 0
+- P1 (follower-guided): 641,139 — P2 (temporal): 186,896 — P3 (root): 16,814
+- Size: min=3, median=10, mean=22.1, p95=69, max=1,854
+- Events: E1=2,732 / E2=3,338 / E3=2,716 / E4=1,320 / E5=1,375 / E6=930 / baseline=27,572
+- Outputs: `outputs/cascade_construction/cascades.parquet`, `cascade_meta.parquet`
 
-| # | Task | Deliverable |
-|---|------|-------------|
-| 20 | Create `blueccgl/stages/build_pyg_dataset.py` | PyG dataset builder |
-| 21 | Create R-GCN encoder, DiffPool, losses, augmentations | Model code |
-| 22 | Unit tests: forward pass, gradient flow, augmentation validity | Green tests |
-| 23 | Test training loop on sample cascades (expect poor results — too little data) | Training code verified |
+**Bugs fixed during Sprint 3:**
+- `_load_follower_graph` only checked `Data/raw/followers.csv.gz` — added fallback to `Data/followers.csv.gz`
+- Per-edge DuckDB query was O(n) round-trips (~26 hr estimate). Fixed with `preload_for_users()`: one batch query loads all relevant edges into a Python set. Total run time: ~3 min
 
-### Sprint 5: Full Data Integration (once downloaded)
+### Sprint 4: PyG Dataset + Model Skeleton — NOT STARTED (next session)
 
-| # | Task | Deliverable |
-|---|------|-------------|
-| 24 | Download full Zenodo dataset | `Data/raw/` populated |
-| 25 | Run `--stage nlp_filter` on full `user_posts.tar.gz` | Full conflict post index |
-| 26 | Run `--stage cascade_construction` with all data sources | Full cascade dataset |
-| 27 | Run `--stage build_pyg_dataset` | Full PyG dataset |
-| 28 | Run `--stage eda` | EDA plots + statistics |
-| 29 | Run `--stage train` | Trained BlueCCGL model |
-| 30 | Run `--stage extract_embeddings → cluster → evaluate` | Archetype discovery |
-| 31 | Run `--stage ablation` | Ablation comparison table |
-| 32 | Run `--stage downstream` | Transfer evaluation |
-| 33 | Run `--stage stability` | Stability report |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 20 | Create `blueccgl/stages/build_pyg_dataset.py` | NOT STARTED | Stub exists. Needs: node features (temporal_delta, sent_label, sent_score, depth, in_deg, out_deg), edge_index, edge_type |
+| 21 | Create R-GCN encoder, DiffPool, losses, augmentations | NOT STARTED | `blueccgl/models/` and `blueccgl/augmentations/` dirs need to be created |
+| 22 | Unit tests: forward pass, gradient flow, augmentation validity | NOT STARTED | |
+| 23 | Test training loop on sample cascades | NOT STARTED | |
+
+**To start Sprint 4, run:**
+```bash
+.venv/bin/python run_pipeline.py --config config.yaml --output-dir ./outputs --stage build_pyg_dataset
+```
+
+### Sprint 5: Full Data Integration
+
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 24 | Download full Zenodo dataset | PARTIAL | `user_posts.tar.gz` (19 GB) + `followers.csv.gz` (469 MB) downloaded. Others not needed for current approach |
+| 25 | Run `--stage nlp_filter` on full tar | DONE | 1,947,493 conflict posts, 85 min |
+| 26 | Run `--stage cascade_construction` with full data | DONE | 39,983 cascades, ~3 min |
+| 27 | Run `--stage build_pyg_dataset` | NOT STARTED | Next step |
+| 28 | Run `--stage eda` | BLOCKED on #27 | |
+| 29–33 | Train → Evaluate → Ablation → Downstream → Stability | NOT STARTED | |
 
 ---
 
 ## Risk Register
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| **Python 3.14 incompatible with PyTorch/PyG** | High | Blocks all ML code | Create 3.11/3.12 venv as first step |
-| **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation |
-| **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool |
-| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature |
-| **Follower graph temporal confound** | Certain | Biased FOLLOWER labels for early cascades | Acknowledge as limitation; sensitivity analysis |
-| **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | Try multiple `min_cluster_size` values; consider UMAP pre-reduction |
-| **Cascade reconstruction heuristic too lossy** | Medium | Inaccurate cascade trees | Validate via known properties (e.g., branching factor distributions from literature) |
-| **Keyword false positives (e.g., "Israel" matching non-conflict content)** | Medium | Noisy cascade roots | Manual validation; context-aware filtering for ambiguous keywords |
-| **Sample data insufficient for cascade testing** | High | Can't test cascade construction without `interactions.csv.gz` / `followers.csv.gz` | Use degraded mode with `repost_from` field only; test full pipeline once data arrives |
-| **Training on single GPU too slow for 100 epochs** | Low-Medium | Schedule slippage | Profile first; reduce epochs / cascade count if needed; use mixed precision (fp16) |
+| Risk | Likelihood | Impact | Mitigation | Status |
+|------|-----------|--------|------------|--------|
+| **Python 3.14 incompatible with PyTorch/PyG** | High | Blocks all ML code | Create 3.11/3.12 venv as first step | RESOLVED — Python 3.14 works with CPU torch 2.10.0 + PyG 2.7.0 from wheel server |
+| **Disk space for full data** | — | — | — | RESOLVED — CPU-only torch + pip cache purge freed space. Streaming tar (no full extraction) keeps footprint manageable. ~15 GB free |
+| **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation | OPEN — waiting for full cascade construction results |
+| **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool | OPEN |
+| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | OPEN |
+| **Follower graph temporal confound** | Certain | Biased FOLLOWER labels for early cascades | Acknowledge as limitation; sensitivity analysis | OPEN |
+| **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | Try multiple `min_cluster_size` values; consider UMAP pre-reduction | OPEN |
+| **Cascade reconstruction heuristic too lossy** | Medium | Inaccurate cascade trees | Validate via known properties (e.g., branching factor distributions from literature) | OPEN |
+| **Keyword false positives (e.g., "hostage")** | Medium | Noisy cascade roots | Co-occurrence gate: "hostage/hostages" requires ≥1 other keyword to match | MITIGATED — gate implemented in keywords.py |
+| **Sample data insufficient for cascade testing** | High | Can't test cascade construction without followers data | Use degraded mode with `repost_from` field only; test full pipeline once data arrives | RESOLVED — full data downloaded, unit tests pass |
+| **Training on single GPU too slow for 100 epochs** | Low-Medium | Schedule slippage | CPU-only mode (no NVIDIA GPU). Profile first; reduce epochs / cascade count if needed | OPEN — will need to profile |
+| **NLP filter too slow on full tar (6+ hours)** | — | Schedule delay | Switched from `r:gz` + `getmembers()` to `r\|gz` streaming + multiprocessing (15 workers) | RESOLVED — 95 files/sec → 500 files/sec (~80 min) |
 
 ---
 
-## Key Decisions to Make Early
+## Key Decisions Made
 
-1. **Python version:** 3.14 or downgrade? → Check PyTorch wheel availability immediately.
-2. **DuckDB vs. in-memory for follower graph:** Depends on available RAM. Default to DuckDB.
-3. **DiffPool vs. SAGPool:** Try DiffPool first; switch if OOM. Wire the pooling module as a config toggle.
-4. **Wiener index computation:** Implement the O(N) tree-based algorithm, not the naive O(N²).
-5. **Cascade size threshold:** Can't decide until full data is processed. Build the code to accept a config parameter.
-6. **Hard negatives:** Implement as optional (config flag `augmentation.hard_negatives: true`). Can be disabled for initial experiments.
+1. **Python version:** 3.14 works. CPU-only torch from `download.pytorch.org/whl/cpu`.
+2. **DuckDB for follower graph:** Yes. `FollowerGraph` class auto-builds indexed DuckDB from `followers.csv.gz` on first use.
+3. **No `interactions.csv.gz` needed:** Cascade construction uses `repost_from`/`reposted_author` from user_posts directly (via `conflict_window_posts.parquet`). No need for separate interactions file.
+4. **Streaming tar approach:** 19 GB tar never fully extracted. `conflict_window_posts.parquet` (2.4 GB, 172M rows) pre-extracted for fast reposter discovery. NLP filter streams with `r|gz` mode.
+5. **`--set` bool override:** Fixed to cast `"true"`/`"false"` strings to Python bools.
+
+## Key Decisions Still Open
+
+1. **DiffPool vs. SAGPool:** Try DiffPool first; switch if OOM. Config toggle ready (`model.pool`).
+2. **Wiener index computation:** Implement O(N) tree-based algorithm.
+3. **Cascade size threshold:** `cascade_min_size: 10` in config, fallback to 5. Decide after seeing full distribution.
+4. **Hard negatives:** Config flag ready (`augmentation.hard_negatives: true`).
+
+---
+
+## Known Bugs Fixed
+
+1. **`extract_conflict_window.py` — `batch.append()` in wrong block:** Was inside `if files_done % 100 == 0:` (file-level progress) instead of per-line loop. Produced 593 KB parquet instead of 2.4 GB. Fixed 2025-03-17.
+2. **`run_pipeline.py` — `--set key=false` treated as truthy string:** `"false"` failed int/float cast, stayed as string `"false"` (truthy). Added bool casting before numeric. Fixed 2025-03-17.
+3. **`nlp_filter.py` — `_iter_tar` used `getmembers()` with `r:gz`:** After reading all 2.3M headers, each `extractfile()` forced gzip re-decompression from start (O(n²)). Switched to `r|gz` streaming + multiprocessing. 95 → 500 files/sec. Fixed 2025-03-17.
+4. **`quick_look.py` — `langs_list or []` ValueError:** Numpy array `or` is ambiguous. Fixed with explicit None/length check.
+5. **`cascade_construction.py` — `_load_follower_graph` wrong path:** Only checked `Data/raw/followers.csv.gz`. Added fallback to `Data/followers.csv.gz`. Fixed 2025-03-17.
+6. **`follower_graph.py` — per-edge DuckDB queries O(n²):** Each `follows()` call issued a separate SQL query, making tree building take an estimated 26 hours. Fixed with `preload_for_users()`: one batch JOIN query loads all relevant edges into a Python `set` before tree building starts. Total runtime went from 26hr estimate to ~3 min. Fixed 2025-03-17.

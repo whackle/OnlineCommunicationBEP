@@ -132,6 +132,18 @@ def run(cfg: dict, output_dir: Path) -> None:
     # ── Step 3: Load follower graph (if available) ──────────────────────
     follower_graph = _load_follower_graph(cfg)
 
+    # Preload relevant follower edges into memory for fast in-process lookups.
+    # Collect all user IDs that will participate in cascade trees.
+    if follower_graph is not None:
+        cascade_user_ids: set[int] = set()
+        for root_pid, root_info in root_lookup.items():
+            reposters = reposters_by_root.get(root_pid, [])
+            if len(reposters) + 1 >= min_size:
+                cascade_user_ids.add(root_info["user_id"])
+                for r in reposters:
+                    cascade_user_ids.add(r.user_id)
+        follower_graph.preload_for_users(cascade_user_ids)
+
     # ── Step 4: Build cascade trees ─────────────────────────────────────
     print(f"[cascade] Building cascade trees (min_size={min_size}, max_size={max_size})...")
 
@@ -224,6 +236,12 @@ def run(cfg: dict, output_dir: Path) -> None:
 def _load_follower_graph(cfg: dict) -> FollowerGraph | None:
     csv_gz = Path(cfg["data"]["raw_dir"]) / "followers.csv.gz"
     db_path = Path(cfg["cascade"].get("follower_db_path", "Data/followers.duckdb"))
+
+    # Also check Data/ directly (user may not have a raw/ subdir)
+    if not csv_gz.exists():
+        alt = Path("Data") / "followers.csv.gz"
+        if alt.exists():
+            csv_gz = alt
 
     if db_path.exists():
         print(f"[cascade] Loading follower graph from {db_path}")
