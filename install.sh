@@ -25,8 +25,10 @@ echo "[install] Installing torch ${TORCH_VER}+${WHEEL}..."
 pip install torch==${TORCH_VER} --index-url "$TORCH_INDEX"
 
 # Step 2: PyG extensions (must come after torch)
+# --no-build-isolation lets the build subprocess see the torch we just installed
 echo "[install] Installing torch-scatter, torch-sparse, torch-geometric..."
-pip install torch-scatter torch-sparse torch-geometric -f "$PYG_INDEX"
+pip install torch-scatter torch-sparse torch-geometric \
+    -f "$PYG_INDEX" --no-build-isolation
 
 # Step 3: everything else
 echo "[install] Installing remaining dependencies..."
