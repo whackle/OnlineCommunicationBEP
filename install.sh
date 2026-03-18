@@ -4,7 +4,6 @@ set -e
 # Detect CUDA version from nvidia-smi, fall back to CPU
 if command -v nvidia-smi &>/dev/null; then
     CUDA_VER=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" | tr -d '.')
-    # Map to nearest supported torch wheel suffix
     if   [ "$CUDA_VER" -ge 124 ] 2>/dev/null; then WHEEL="cu124"
     elif [ "$CUDA_VER" -ge 121 ] 2>/dev/null; then WHEEL="cu121"
     elif [ "$CUDA_VER" -ge 118 ] 2>/dev/null; then WHEEL="cu118"
@@ -16,21 +15,29 @@ else
     echo "[install] No GPU detected — installing CPU-only torch"
 fi
 
-TORCH_VER="2.10.0"
-PYG_INDEX="https://data.pyg.org/whl/torch-${TORCH_VER}+${WHEEL}.html"
 TORCH_INDEX="https://download.pytorch.org/whl/${WHEEL}"
 
-# Step 1: torch
-echo "[install] Installing torch ${TORCH_VER}+${WHEEL}..."
-pip install torch==${TORCH_VER} --index-url "$TORCH_INDEX"
+# Step 1: install torch (latest stable for this CUDA version)
+echo "[install] Installing torch..."
+pip install torch --index-url "$TORCH_INDEX"
 
-# Step 2: PyG extensions (must come after torch)
-# --no-build-isolation lets the build subprocess see the torch we just installed
+# Step 2: detect the exact torch version that was installed
+TORCH_VER=$(python -c "import torch; print(torch.__version__.split('+')[0])")
+echo "[install] torch ${TORCH_VER} installed"
+
+PYG_INDEX="https://data.pyg.org/whl/torch-${TORCH_VER}+${WHEEL}.html"
+
+# Step 3: PyG extensions — use pre-built wheels, no source compilation
 echo "[install] Installing torch-scatter, torch-sparse, torch-geometric..."
 pip install torch-scatter torch-sparse torch-geometric \
-    -f "$PYG_INDEX" --no-build-isolation
+    --find-links "$PYG_INDEX" --no-index \
+    || {
+        echo "[install] Pre-built wheels not found, falling back to PyPI index..."
+        pip install torch-scatter torch-sparse torch-geometric \
+            -f "$PYG_INDEX" --no-build-isolation
+    }
 
-# Step 3: everything else
+# Step 4: everything else
 echo "[install] Installing remaining dependencies..."
 pip install \
     duckdb==1.5.0 \
@@ -48,4 +55,4 @@ pip install \
     scipy==1.15.3 \
     pytest==8.3.5
 
-echo "[install] Done."
+echo "[install] Done. torch==${TORCH_VER}+${WHEEL}"
