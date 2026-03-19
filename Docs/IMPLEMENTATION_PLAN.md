@@ -1,6 +1,6 @@
 # BlueCCGL — Full Implementation Plan
 
-## Current State Assessment (Updated 2025-03-17)
+## Current State Assessment (Updated 2026-03-18)
 
 | Asset | Status |
 |-------|--------|
@@ -9,8 +9,10 @@
 | **Full data — followers.csv.gz** | Downloaded (469 MB, ~144M edges). In `Data/followers.csv.gz` |
 | **Full data — others** | NOT downloaded: `interactions.csv.gz` (1 GB), `graphs.tar.gz` (891 MB), `feed_posts.tar.gz` (16.4 MB), `feed_bookmarks.csv` (553 KB). **Not needed for current cascade construction approach** — we use `repost_from`/`reposted_author` fields from user_posts instead |
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
+| **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml` + 12 stage stubs. Stages `nlp_filter` and `cascade_construction` are implemented |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. Stages `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, and `train` fully implemented. Downstream stages (cluster, evaluate, extract_embeddings, ablation, downstream, stability) are stubs |
+| **Training** | IN PROGRESS — contrastive pre-training on full 39,983 cascades. 3 epochs completed (loss: 2.148 → 1.861 → 1.839). ~185 s/epoch on CPU. Checkpoints in `outputs/train/` |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
 
 ### Progress Summary
@@ -20,8 +22,8 @@
 | Sprint 1: Scaffolding | DONE | All package structure, CLI, config, pipeline orchestrator, seed, gitignore |
 | Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
 | Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
-| Sprint 4: PyG Dataset + Model | NOT STARTED | Next up |
-| Sprint 5: Full Data Integration | DONE through cascade construction | All data sources consumed |
+| Sprint 4: PyG Dataset + Model | NEAR COMPLETE | Dataset built; all models + augmentations + tests implemented; training in progress |
+| Sprint 5: Full Data Integration | DONE through build_pyg_dataset | cascade_dataset.pt built from full cascades |
 
 ---
 
@@ -715,19 +717,35 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 - `_load_follower_graph` only checked `Data/raw/followers.csv.gz` — added fallback to `Data/followers.csv.gz`
 - Per-edge DuckDB query was O(n) round-trips (~26 hr estimate). Fixed with `preload_for_users()`: one batch query loads all relevant edges into a Python set. Total run time: ~3 min
 
-### Sprint 4: PyG Dataset + Model Skeleton — NOT STARTED (next session)
+### Sprint 4: PyG Dataset + Model Skeleton — NEAR COMPLETE
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 20 | Create `blueccgl/stages/build_pyg_dataset.py` | NOT STARTED | Stub exists. Needs: node features (temporal_delta, sent_label, sent_score, depth, in_deg, out_deg), edge_index, edge_type |
-| 21 | Create R-GCN encoder, DiffPool, losses, augmentations | NOT STARTED | `blueccgl/models/` and `blueccgl/augmentations/` dirs need to be created |
-| 22 | Unit tests: forward pass, gradient flow, augmentation validity | NOT STARTED | |
-| 23 | Test training loop on sample cascades | NOT STARTED | |
+| 20 | Create `blueccgl/stages/build_pyg_dataset.py` | DONE | Full implementation. Two-pass sentiment lookup: `conflict_posts.parquet` first, DuckDB on `conflict_window_posts.parquet` (172M rows) as fallback. O(N) Wiener index. Outputs: `cascade_dataset.pt` (159.8 MB), `dataset_stats.json` |
+| 21 | Create R-GCN encoder, DiffPool, losses, augmentations | DONE | All 6 model modules + 4 augmentation strategies implemented. DiffPool max_nodes=150 (not 1000) to prevent CPU OOM. `blueccgl/augmentations/__init__.py` provides shared `subgraph()` and `root_component()` utilities |
+| 22 | Unit tests: forward pass, gradient flow, augmentation validity | DONE | `tests/test_model_forward.py` (4 test classes: R-GCN+DiffPool, GCN+mean-pool, no-sentiment, InfoNCE). `tests/test_augmentations.py` (4 test classes, shared `_assert_valid()` validator checking connectivity, root preservation, min-nodes) |
+| 23 | Train stage + test training loop | IN PROGRESS | `train.py` fully implemented: warmup (5 ep) + cosine LR schedule, crash recovery via `last.pt`, early stopping (patience=15). Currently training on full 39,983 cascades. 3 epochs done — loss: 2.148 → 1.861 → 1.839 (~185 s/epoch on CPU). ~100 epochs configured |
 
-**To start Sprint 4, run:**
-```bash
-.venv/bin/python run_pipeline.py --config config.yaml --output-dir ./outputs --stage build_pyg_dataset
-```
+**Full build_pyg_dataset results (2026-03-18):**
+- Cascades: **39,983** — Nodes: 884,832 — Edges: 844,849 — Feature dim: 6
+- Size: min=3, median=10, mean=22.1, p95=69, max=1,854
+- Depth: min=1, median=4, mean=4.61, p95=11, max=60
+- Follower ratio: median=0.80, mean=0.78
+- Sentiment: negative=54.5%, neutral=39.65%, positive=5.85%
+- Events: E1=2,732 / E2=3,338 / E3=2,716 / E4=1,320 / E5=1,375 / E6=930 / baseline=27,572
+- Outputs: `outputs/build_pyg_dataset/cascade_dataset.pt` (159.8 MB), `dataset_stats.json`
+
+**Training progress (2026-03-18, in progress):**
+
+| Epoch | Loss | Contrastive | Aux | LR | Grad Norm | Time |
+|-------|------|-------------|-----|-----|-----------|------|
+| 1 | 2.148 | 2.078 | 0.070 | 0.0002 | 1.794 | 192 s |
+| 2 | 1.861 | 1.847 | 0.015 | 0.0004 | 1.544 | 379 s |
+| 3 | 1.839 | 1.826 | 0.012 | 0.0006 | 1.577 | 556 s |
+
+- Aux loss dropped sharply after epoch 1 (healthy — DiffPool not dominating)
+- LR in warmup phase (target 1e-3 at epoch 5)
+- Checkpoints: `outputs/train/best.pt`, `epoch_N.pt`, `last.pt`, `config_snapshot.yaml`
 
 ### Sprint 5: Full Data Integration
 
@@ -736,9 +754,15 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 | 24 | Download full Zenodo dataset | PARTIAL | `user_posts.tar.gz` (19 GB) + `followers.csv.gz` (469 MB) downloaded. Others not needed for current approach |
 | 25 | Run `--stage nlp_filter` on full tar | DONE | 1,947,493 conflict posts, 85 min |
 | 26 | Run `--stage cascade_construction` with full data | DONE | 39,983 cascades, ~3 min |
-| 27 | Run `--stage build_pyg_dataset` | NOT STARTED | Next step |
-| 28 | Run `--stage eda` | BLOCKED on #27 | |
-| 29–33 | Train → Evaluate → Ablation → Downstream → Stability | NOT STARTED | |
+| 27 | Run `--stage build_pyg_dataset` | DONE | cascade_dataset.pt (159.8 MB, 39,983 cascades). 2026-03-18 |
+| 28 | Run `--stage eda` | NOT STARTED | Unblocked. Stub only — needs implementation |
+| 29 | Run `--stage train` | IN PROGRESS | 3/100 epochs done. ~185 s/epoch on CPU |
+| 30 | Run `--stage extract_embeddings` | NOT STARTED | Stub — blocked on train completing |
+| 31 | Run `--stage cluster` | NOT STARTED | Stub — blocked on #30 |
+| 32 | Run `--stage evaluate` | NOT STARTED | Stub — blocked on #31 |
+| 33 | Run `--stage ablation` (A1–A5) | NOT STARTED | Stub — blocked on #32 |
+| 34 | Run `--stage downstream` | NOT STARTED | Stub — blocked on #32 |
+| 35 | Run `--stage stability` | NOT STARTED | Stub — blocked on #30 |
 
 ---
 
@@ -748,9 +772,9 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 |------|-----------|--------|------------|--------|
 | **Python 3.14 incompatible with PyTorch/PyG** | High | Blocks all ML code | Create 3.11/3.12 venv as first step | RESOLVED — Python 3.14 works with CPU torch 2.10.0 + PyG 2.7.0 from wheel server |
 | **Disk space for full data** | — | — | — | RESOLVED — CPU-only torch + pip cache purge freed space. Streaming tar (no full extraction) keeps footprint manageable. ~15 GB free |
-| **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation | OPEN — waiting for full cascade construction results |
-| **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool | OPEN |
-| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | OPEN |
+| **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation | RESOLVED — 39,983 cascades at ≥10 threshold. Ample for HDBSCAN with min_cluster_size=50–200 |
+| **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool | MITIGATED — max_nodes=150 in DiffPool. P95 cascade size is 69 nodes, so cap is nearly lossless. Training stable so far |
+| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | OPEN — training in progress. Loss decreasing (2.148 → 1.839 over 3 epochs). Aux loss stabilised at ~0.012. Monitor post-training via cosine similarity histogram |
 | **Follower graph temporal confound** | Certain | Biased FOLLOWER labels for early cascades | Acknowledge as limitation; sensitivity analysis | OPEN |
 | **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | Try multiple `min_cluster_size` values; consider UMAP pre-reduction | OPEN |
 | **Cascade reconstruction heuristic too lossy** | Medium | Inaccurate cascade trees | Validate via known properties (e.g., branching factor distributions from literature) | OPEN |
@@ -768,13 +792,18 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 3. **No `interactions.csv.gz` needed:** Cascade construction uses `repost_from`/`reposted_author` from user_posts directly (via `conflict_window_posts.parquet`). No need for separate interactions file.
 4. **Streaming tar approach:** 19 GB tar never fully extracted. `conflict_window_posts.parquet` (2.4 GB, 172M rows) pre-extracted for fast reposter discovery. NLP filter streams with `r|gz` mode.
 5. **`--set` bool override:** Fixed to cast `"true"`/`"false"` strings to Python bools.
+6. **DiffPool max_nodes=150:** Capped at 150 nodes (not 1000 as originally planned) to prevent CPU OOM during dense assignment matrix operations. The p95 cascade size is 69 nodes, so this cap is essentially lossless for 95% of cascades.
+7. **Batch size 32:** Reduced from 64 to 32 to fit CPU memory during training. InfoNCE still has 31 negatives per positive pair.
+8. **Augmentation utilities in `__init__.py`:** Shared `subgraph()` and `root_component()` helpers live in `blueccgl/augmentations/__init__.py` rather than duplicating across strategies.
+9. **Two-pass sentiment lookup in `build_pyg_dataset`:** Primary lookup in `conflict_posts.parquet` (1.9M rows, fast); DuckDB fallback on `conflict_window_posts.parquet` (172M rows) for reposter nodes not in the NLP-filtered set.
+10. **Crash recovery in `train.py`:** `last.pt` checkpoint saved every epoch enables resume from interruption without loss of progress.
 
 ## Key Decisions Still Open
 
-1. **DiffPool vs. SAGPool:** Try DiffPool first; switch if OOM. Config toggle ready (`model.pool`).
-2. **Wiener index computation:** Implement O(N) tree-based algorithm.
-3. **Cascade size threshold:** `cascade_min_size: 10` in config, fallback to 5. Decide after seeing full distribution.
-4. **Hard negatives:** Config flag ready (`augmentation.hard_negatives: true`).
+1. **DiffPool vs. SAGPool:** DiffPool is running (max_nodes=150). Switch to SAGPool only if training instability arises. Config toggle ready (`model.pool`).
+2. **Hard negatives during training:** `augmentation.hard_negatives: true` in config. Confirm this is active in `train.py` — benefits are clearest once loss plateaus past warmup.
+3. **Optimal training duration:** 100 epochs configured (~5 hrs on CPU). May want to stop early if loss plateaus and use best.pt. Monitor via `outputs/train/training_log.json`.
+4. **HDBSCAN `min_cluster_size`:** Grid search over {50, 100, 200} planned. With 39,983 cascades and 69% baseline (27,572), event-specific cascades are smaller per event (930–3,338). May need min_cluster_size=50 to avoid overcollapsing.
 
 ---
 
