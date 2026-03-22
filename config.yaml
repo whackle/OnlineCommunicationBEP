@@ -41,13 +41,13 @@ augmentation:
   hard_negatives: true
 
 training:
-  epochs: 100
+  epochs: 50
   batch_size: 64
   lr: 1.0e-3
   lr_schedule: cosine                 # options: cosine | constant
   lr_min: 1.0e-5
   warmup_epochs: 5
-  temperature: 0.5                    # InfoNCE tau; swept over [0.1, 0.3, 0.5, 0.7]
+  temperature: 0.1                    # InfoNCE tau; lowered from 0.5 — sharper contrastive signal
   grad_clip_norm: 1.0
   checkpoint_every: 10               # epochs between checkpoints
   log_grad_norm_every: 50            # batches between gradient norm logs
