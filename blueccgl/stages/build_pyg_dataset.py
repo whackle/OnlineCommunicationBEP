@@ -43,11 +43,12 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
     # ── 2. Build sentiment lookup ────────────────────────────────────────
     sentiment = _build_sentiment_lookup(edges_df, output_dir, cfg)
 
-    # ── 3. Precompute epoch seconds ──────────────────────────────────────
-    edges_df = edges_df.assign(
-        source_epoch=edges_df["source_ts"].values.astype("datetime64[s]").astype("float64"),
-        target_epoch=edges_df["target_ts"].values.astype("datetime64[s]").astype("float64"),
-    )
+    # ── 3. Build post_id lookup for temporal ordering ─────────────────
+    # The dataset's repost timestamps reflect the original post's creation
+    # time, not the repost time.  We use post_id as a temporal ordering
+    # proxy: 88.6% of reposts have post_id > source post_id.
+    post_id_lookup = _build_post_id_lookup(edges_df, output_dir, cfg)
+    edges_df = _add_post_id_columns(edges_df, post_id_lookup)
 
     # ── 4. Convert each cascade ──────────────────────────────────────────
     print("[build_pyg] Converting to PyG Data objects...")
@@ -64,8 +65,8 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
                 source_uids=grp["source_uid"].values,
                 target_uids=grp["target_uid"].values,
                 edge_types=grp["edge_type"].values,
-                source_epoch=grp["source_epoch"].values,
-                target_epoch=grp["target_epoch"].values,
+                source_order=grp["source_post_id"].values.astype("float64"),
+                target_order=grp["target_post_id"].values.astype("float64"),
                 event_window=event,
                 sentiment=sentiment,
             )
@@ -88,6 +89,96 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
     stats["file_size_mb"] = round(size_mb, 1)
     (out_dir / "dataset_stats.json").write_text(json.dumps(stats, indent=2))
     _print_summary(stats)
+
+
+# ── Post-ID temporal ordering ────────────────────────────────────────────────
+
+
+def _build_post_id_lookup(
+    edges_df: pd.DataFrame, output_dir: Path, cfg: dict,
+) -> dict[int, int]:
+    """Build uid → post_id lookup for temporal ordering.
+
+    Roots are identified by cascade_id (= root post_id).  For reposters,
+    we query conflict_window_posts.parquet which stores per-repost post_ids.
+    """
+    import duckdb
+
+    # Collect all unique user IDs and the cascade_ids (root post_ids) they appear in.
+    # For roots: cascade_id IS the post_id.
+    all_uids = (
+        set(edges_df["source_uid"].unique().tolist())
+        | set(edges_df["target_uid"].unique().tolist())
+    )
+    # Root UIDs: source_uid that never appears as target_uid (per cascade)
+    # For simplicity, build from conflict_window_posts directly.
+    cascade_ids = set(edges_df["cascade_id"].unique().tolist())
+
+    lookup: dict[int, int] = {}
+
+    # Pass 1: roots — cascade_id is the root's post_id
+    root_rows = edges_df.drop_duplicates(subset="cascade_id")[["cascade_id", "source_uid"]]
+    # Actually, source_uid of an edge may not be the root — get unique roots
+    # Root = source_uid that never appears as target_uid within the same cascade
+    for cid, grp in edges_df.groupby("cascade_id"):
+        target_set = set(grp["target_uid"].tolist())
+        for src in grp["source_uid"]:
+            if int(src) not in target_set:
+                lookup[int(src)] = int(cid)  # root's post_id = cascade_id
+                break
+
+    remaining = all_uids - set(lookup.keys())
+    print(f"[build_pyg] Post-ID pass 1 (roots): {len(lookup):,} resolved, "
+          f"{len(remaining):,} remaining")
+
+    # Pass 2: reposters — query conflict_window_posts for post_ids
+    if remaining:
+        cwp = Path(cfg["data"].get(
+            "conflict_window_parquet", "Data/conflict_window_posts.parquet"
+        ))
+        if cwp.exists():
+            con = duckdb.connect()
+            uid_df = pd.DataFrame({"uid": np.array(list(remaining), dtype=np.int64)})
+            cid_df = pd.DataFrame({"cid": np.array(list(cascade_ids), dtype=np.int64)})
+            con.register("target_uids", uid_df)
+            con.register("cascade_ids", cid_df)
+
+            result = con.execute(f"""
+                SELECT p.user_id, p.post_id
+                FROM read_parquet('{cwp}') p
+                WHERE p.user_id IN (SELECT uid FROM target_uids)
+                  AND p.repost_from IN (SELECT cid FROM cascade_ids)
+            """).fetchdf()
+            con.close()
+
+            # Keep first post_id per user (if multiple reposts, take any)
+            result = result.drop_duplicates(subset="user_id", keep="first")
+            for _, row in result.iterrows():
+                lookup[int(row["user_id"])] = int(row["post_id"])
+
+            still_missing = len(all_uids) - len(lookup)
+            print(f"[build_pyg] Post-ID pass 2 (conflict_window): "
+                  f"{len(result):,} resolved, {still_missing:,} will use cascade_id fallback")
+        else:
+            print(f"[build_pyg] WARNING: {cwp} not found — "
+                  f"post_id lookup degraded for {len(remaining):,} users")
+
+    return lookup
+
+
+def _add_post_id_columns(
+    edges_df: pd.DataFrame, post_id_lookup: dict[int, int],
+) -> pd.DataFrame:
+    """Add source_post_id and target_post_id columns to the edge DataFrame."""
+    edges_df = edges_df.assign(
+        source_post_id=edges_df["source_uid"].map(
+            lambda uid: post_id_lookup.get(int(uid), 0)
+        ),
+        target_post_id=edges_df["target_uid"].map(
+            lambda uid: post_id_lookup.get(int(uid), 0)
+        ),
+    )
+    return edges_df
 
 
 # ── Sentiment recovery ───────────────────────────────────────────────────────

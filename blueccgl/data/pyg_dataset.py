@@ -2,7 +2,7 @@
 Convert cascade edge lists to PyG Data objects.
 
 Node features [N, 6]:
-    0: temporal_delta  — log1p(minutes since root post)
+    0: temporal_delta  — log1p(post_id offset from root; proxy for temporal order)
     1: sent_label      — ordinal (0=neg, 1=neutral, 2=pos)
     2: sent_score      — float sentiment confidence
     3: depth           — hop distance from root in cascade tree
@@ -44,8 +44,8 @@ def edges_to_pyg(
     source_uids: np.ndarray,
     target_uids: np.ndarray,
     edge_types: np.ndarray,
-    source_epoch: np.ndarray,
-    target_epoch: np.ndarray,
+    source_order: np.ndarray,
+    target_order: np.ndarray,
     event_window: str,
     sentiment: dict[int, tuple[int, float]],
 ) -> Data:
@@ -55,20 +55,22 @@ def edges_to_pyg(
         cascade_id: Root post ID.
         source_uids/target_uids: Parent/child user IDs per edge.
         edge_types: 0=FOLLOWER, 1=NON_FOLLOWER, 2=UNKNOWN.
-        source_epoch/target_epoch: Timestamps as epoch seconds (float64).
+        source_order/target_order: Temporal ordering values per edge (post_id
+            used as proxy since repost timestamps in the dataset reflect the
+            original post's creation time, not the repost time).
         event_window: Event string key (e.g. "E1", "baseline").
         sentiment: uid -> (sent_label, sent_score) lookup.
     """
     E = len(source_uids)
 
-    # --- Collect unique nodes with their timestamps ---
-    uid_ts: dict[int, float] = {}
+    # --- Collect unique nodes with their ordering values ---
+    uid_order: dict[int, float] = {}
     for i in range(E):
         s, t = int(source_uids[i]), int(target_uids[i])
-        if s not in uid_ts:
-            uid_ts[s] = float(source_epoch[i])
-        if t not in uid_ts:
-            uid_ts[t] = float(target_epoch[i])
+        if s not in uid_order:
+            uid_order[s] = float(source_order[i])
+        if t not in uid_order:
+            uid_order[t] = float(target_order[i])
 
     # Root = source that never appears as target
     target_set = set(int(x) for x in target_uids)
@@ -76,10 +78,11 @@ def edges_to_pyg(
         (int(s) for s in source_uids if int(s) not in target_set),
         int(source_uids[0]),
     )
+    root_order = uid_order[root_uid]
 
     # Contiguous reindexing: root = 0
     uid_to_idx: dict[int, int] = {root_uid: 0}
-    for uid in uid_ts:
+    for uid in uid_order:
         if uid not in uid_to_idx:
             uid_to_idx[uid] = len(uid_to_idx)
     N = len(uid_to_idx)
@@ -118,12 +121,14 @@ def edges_to_pyg(
         out_deg[edge_index[0, i].item()] += 1
         in_deg[edge_index[1, i].item()] += 1
 
-    # --- Temporal delta: log1p(minutes since root) ---
-    root_epoch = uid_ts[root_uid]
+    # --- Temporal delta: log1p(post_id offset from root) ---
+    # The dataset's repost timestamps reflect the original post's creation
+    # time, not the repost time. We use post_id as a temporal proxy instead
+    # (88.6% of reposts have post_id > source post_id in this dataset).
     temporal = [0.0] * N
     for uid, idx in uid_to_idx.items():
-        delta_min = max(0.0, (uid_ts[uid] - root_epoch) / 60.0)
-        temporal[idx] = float(np.log1p(delta_min))
+        delta = max(0.0, uid_order[uid] - root_order)
+        temporal[idx] = float(np.log1p(delta))
 
     # --- Sentiment ---
     sl = [1.0] * N   # default neutral
