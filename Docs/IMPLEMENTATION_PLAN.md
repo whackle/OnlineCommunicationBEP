@@ -54,6 +54,7 @@ OnlineCommunicationBEP/
 │   │   ├── extract_embeddings.py    # --stage extract_embeddings
 │   │   ├── cluster.py           # --stage cluster
 │   │   ├── evaluate.py          # --stage evaluate
+│   │   ├── explain.py           # --stage explain (XAI: probes, DiffPool assignments, cluster profiles, augmentation sensitivity)
 │   │   ├── ablation.py          # --stage ablation
 │   │   ├── downstream.py        # --stage downstream
 │   │   └── stability.py         # --stage stability
@@ -65,13 +66,14 @@ OnlineCommunicationBEP/
 │   │   ├── diffpool.py          # Hierarchical DiffPool + sentiment enrichment
 │   │   ├── readout.py           # Final MLP readout to embedding space
 │   │   ├── blueccgl.py          # Full model assembly
-│   │   └── losses.py            # InfoNCE + DiffPool auxiliary losses
+│   │   └── losses.py            # InfoNCE + DiffPool auxiliary + VICReg variance losses
 │   │
 │   ├── augmentations/           # Feed-aware augmentation strategies
 │   │   ├── __init__.py
 │   │   ├── follower_subgraph.py # Strategy A
 │   │   ├── temporal_prefix.py   # Strategy B
 │   │   ├── bridge_removal.py    # Strategy C
+│   │   ├── feature_masking.py   # Feature-dim zeroing (v2 retrain addition)
 │   │   └── random_aug.py        # Generic augmentation (ablation A2)
 │   │
 │   ├── data/                    # Data loading and processing
@@ -616,7 +618,126 @@ Training loop:
    - Follower-edge ratio (continuous colour scale)
 4. Archetype characterisation: for each cluster, compute mean ± std of all structural and sentiment features.
 
-### Step 4.5 — Ablation Stage (`blueccgl/stages/ablation.py`)
+### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`)
+
+**Stage:** `--stage explain`
+**Reads:**
+- `{output_dir}/train/checkpoints/best.pt`
+- `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
+- `{output_dir}/extract_embeddings/embeddings.h5`
+- `{output_dir}/cluster/cluster_assignments.parquet`
+**Writes:** `{output_dir}/explain/` (see output structure below)
+
+**Dependency:** `cluster` (runs after clustering assigns archetypes)
+
+Multi-layer explainability pipeline with 4 sub-steps, each answering a distinct question about discovered cascade archetypes.
+
+#### Sub-step 5.1 — Probing Classifiers (What is encoded in the embeddings?)
+
+Train lightweight linear classifiers (logistic regression / shallow MLP) on frozen 64-dim embeddings to predict interpretable graph properties already stored on each `Data` object: `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `sentiment_composition`, `cascade_size`, `event_window`.
+
+**Output:** `explain/probe_results.json` — R²/accuracy per property, overall and per-cluster.
+
+**Interpretation:** If wiener_index is predictable with R²=0.87 but sentiment gives R²=0.12, the contrastive objective has encoded structural virality but not sentiment dynamics. Per-cluster breakdown characterises each archetype in terms of what the model sees in it.
+
+**Key reference:** Alain & Bengio (2017). "Understanding intermediate layers using linear classifier probes."
+
+#### Sub-step 5.2 — DiffPool Assignment Extraction (What structural roles does the model learn?)
+
+The `HierarchicalDiffPool` already computes soft assignment matrices `s1` (Level 1) and `s2` (Level 2) during forward pass — this is free explainability currently being discarded.
+
+**Implementation:**
+1. Add `return_assignments=False` parameter to `HierarchicalDiffPool.forward()` in [diffpool.py](blueccgl/models/diffpool.py). When True, also return `s1`, `s2`.
+2. Add `explain(batch)` method to `BlueCCGL` in [blueccgl.py](blueccgl/models/blueccgl.py) that returns `(embedding, s1, s2, node_embeddings_h)`.
+3. Run inference over all cascades, extracting assignment matrices.
+4. For each cascade: compute assignment entropy per node (high entropy = ambiguous role, low = clear role), hard partition via argmax, super-node feature profiles (mean depth, sentiment, degree of member nodes).
+5. Aggregate super-node characterisations per HDBSCAN cluster.
+
+**Output:** `explain/diffpool_assignments.h5` — assignment matrices, entropy maps, super-node profiles.
+
+**Interpretation:** "In Archetype A, DiffPool consistently groups high-degree early adopters into super-node 0 and sentiment-polarised leaf nodes into super-node 1." Visualise as node-coloured cascade tree layouts.
+
+**Key reference:** Ying et al. (2018). "Hierarchical Graph Representation Learning with Differentiable Pooling."
+
+#### Sub-step 5.3 — Cluster Statistical Profiles (What distinguishes archetypes?)
+
+For each HDBSCAN cluster, compute summary statistics of all graph-level properties and run statistical tests.
+
+**Implementation:**
+1. Per-cluster: mean ± std of `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `sentiment_composition` (3 dims), `cascade_size`.
+2. Between-cluster: Kruskal-Wallis test per property, then pairwise Mann-Whitney U with Bonferroni correction.
+3. Discriminative embedding dimensions: PCA on cluster centroids → identify which of the 64 dims have highest between-cluster variance → correlate with probing classifier weights from Sub-step 5.1.
+
+**Output:** `explain/cluster_profiles.json` — per-archetype profiles, pairwise significance tables, discriminative dimensions.
+
+**Interpretation:** "Archetype A (n=342): deep chains (depth=8.2±2.1), low follower ratio (0.23), negative sentiment dominant. Archetype B (n=189): shallow star-bursts (depth=2.1, breadth=45.3), high follower ratio (0.78), neutral sentiment."
+
+#### Sub-step 5.4 — Augmentation Sensitivity Analysis (What is structurally defining for each archetype?)
+
+The three feed-aware augmentations each destroy specific information. By measuring which augmentation changes the embedding most, we reveal what the model considers structurally essential.
+
+**Implementation:**
+1. For each cascade in a sample (e.g., 500 per cluster): apply each augmentation separately, compute `||embed(original) - embed(augmented)||₂`.
+2. Aggregate per cluster: mean sensitivity to follower_subgraph vs. temporal_prefix vs. bridge_removal.
+
+**Output:** `explain/augmentation_sensitivity.json` — per-cluster sensitivity scores per augmentation type.
+
+**Interpretation:** "Cluster 3 is highly sensitive to bridge_removal (non-follower entry nodes are critical) but invariant to follower_subgraph → this archetype is defined by cross-community bridges, not follower structure."
+
+#### Optional Extensions (time permitting)
+
+| Technique | Value | Effort | Notes |
+|---|---|---|---|
+| **GNNExplainer** (PyG `torch_geometric.explain`) | Per-cascade edge/feature importance | ~4h | Needs proxy classifier (predict cluster label); aggregate per cluster |
+| **PGExplainer** (PyG `torch_geometric.explain`) | Global edge-type importance per archetype | ~4h | Inductive — learns generalizable patterns across clusters |
+| **Concept Activation Vectors** (TCAV adapted) | "Does model use concept X?" | ~6h | Define concepts from graph properties (star topology, chain topology, sentiment-polarized, follower-dominated). Train SVMs on embeddings. Highest thesis novelty |
+| **SubgraphX** (DIG library) | Minimal motifs per archetype | ~6h | MCTS-based; expensive (~10-30s per graph). Sample 20 per cluster |
+
+**Key references for optional extensions:**
+- Ying et al. (2019). "GNNExplainer." *NeurIPS.*
+- Luo et al. (2020). "PGExplainer." *NeurIPS.*
+- Kim et al. (2018). "TCAV." *ICML.*
+- Yuan et al. (2021). "SubgraphX." *ICML.*
+- Yuan et al. (2022). "Explainability in GNNs: A Taxonomic Survey." *TPAMI.*
+- Magister et al. (2021). "GCExplainer: Concept-based Explanations for GNNs."
+
+#### Config Addition
+
+```yaml
+explain:
+  n_representatives_per_cluster: 20     # sample size for per-instance analyses
+  run_probes: true
+  run_diffpool_analysis: true
+  run_augmentation_sensitivity: true
+  run_cluster_profiles: true
+  probe_properties: [cascade_depth, cascade_breadth, wiener_index,
+                     follower_edge_ratio, cascade_size, event_window]
+  figures_dpi: 300
+```
+
+#### Output Structure
+
+```
+outputs/explain/
+  probe_results.json                    # R²/accuracy per property per cluster
+  cluster_profiles.json                 # Summary stats + statistical tests + discriminative dims
+  augmentation_sensitivity.json         # Per-cluster sensitivity to each augmentation
+  diffpool_assignments.h5               # Assignment matrices, entropy, super-node profiles
+  explanation_report.json               # Combined summary (stage checkpoint)
+  figures/
+    cluster_radar_profiles.png          # Radar charts per archetype
+    probe_heatmap.png                   # Property × cluster R² heatmap
+    diffpool_prototype_graphs.png       # Representative cascade per cluster with DiffPool coloring
+    augmentation_sensitivity_bars.png   # Per-cluster bar chart of sensitivity per augmentation
+```
+
+#### Failure Mode Audit
+
+1. *Probe overfitting:* Small clusters (<50 cascades) may overfit linear probes. **Diagnostic:** Use leave-one-out CV for small clusters. Report confidence intervals.
+2. *DiffPool degenerate assignments:* If pool_2 is collapsed (as observed in v1 diagnostics), assignment matrices will be near-uniform. **Diagnostic:** Check assignment entropy — if close to max entropy for all cascades, the pool level is uninformative. Skip that level in visualizations.
+3. *Augmentation sensitivity floor effect:* If all augmentations produce nearly identical embeddings (alignment ~1.0, as in v1), sensitivity analysis yields no signal. **Prerequisite:** Retrain v2 must achieve alignment < 0.85 for this sub-step to be meaningful.
+
+### Step 4.6 — Ablation Stage (`blueccgl/stages/ablation.py`)
 
 **Stage:** `--stage ablation`
 **Reads:** `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
@@ -629,7 +750,7 @@ For each ablation variant (A1–A5):
 4. Evaluate.
 5. Collect metrics into a comparison table.
 
-### Step 4.6 — Downstream Stage (`blueccgl/stages/downstream.py`)
+### Step 4.7 — Downstream Stage (`blueccgl/stages/downstream.py`)
 
 **Stage:** `--stage downstream`
 **Reads:** `{output_dir}/train/checkpoints/best.pt`, `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
@@ -643,7 +764,7 @@ Baselines:
 - Random init (same architecture, no pre-training).
 - Handcrafted features: [Wiener index, depth, breadth, branching factor, follower-edge ratio] → MLP.
 
-### Step 4.7 — Stability Stage (`blueccgl/stages/stability.py`)
+### Step 4.8 — Stability Stage (`blueccgl/stages/stability.py`)
 
 **Stage:** `--stage stability`
 **Reads:** `{output_dir}/extract_embeddings/embeddings.h5`
@@ -751,9 +872,44 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 - **Best checkpoint:** epoch 89 (loss 2.29225) → `outputs/train/checkpoints/best.pt`
 - Aux loss collapsed to ~7e-5 by epoch 100 (DiffPool well-behaved)
 - Grad norms stabilised at ~0.3 (no explosion, no clipping saturation)
-- Loss plateau from ~epoch 20 onward (2.318 → 2.292). Contrastive loss well below `log(64) ≈ 4.16` — model is learning, but slow convergence suggests possible embedding saturation. **Requires validation in Sprint 5 via cosine similarity histogram and UMAP inspection**
+- Loss plateau from ~epoch 20 onward (2.318 → 2.292). Contrastive loss well below `log(64) ≈ 4.16` — model is learning, but slow convergence suggests possible embedding saturation
 - Total wall time: ~2.8 hours on CPU
 - Checkpoints: `best.pt`, `last.pt`, `epoch_{10,20,...,100}.pt`, `config_snapshot.yaml`, `training_log.json`
+
+**Training v2 (2026-03-23, τ=0.1 → τ=0.3, retrained with stronger augmentations):**
+
+After diagnostics revealed the v1 model was MARGINAL (see below), the following config changes were applied:
+
+| Parameter | v1 | v2 | Rationale |
+|---|---|---|---|
+| `augmentation.follower_retain_ratio` | 0.7 | 0.5 | Stronger structural perturbation |
+| `augmentation.temporal_prefix_ratio` | 0.6 | 0.4 | Forces learning beyond temporal shortcuts |
+| `augmentation.bridge_remove_ratio` | 0.3 | 0.5 | Removes more non-follower entry nodes |
+| `augmentation.feature_mask_ratio` | 0.0 | 0.25 | **NEW** — randomly zeros 25% of node feature dims per view. Blocks feature-statistics shortcut |
+| `training.temperature` | 0.1 | 0.3 | Harder contrastive task — prevents pretext saturation |
+| `training.variance_weight` | 0.0 | 0.1 | **NEW** — VICReg variance regularisation. Penalises dims with std < 1.0 to prevent dimensional collapse |
+| `model.diffpool_aux_weight` | 0.1 | 0.5 | Keeps DiffPool assignment matrices non-degenerate |
+
+**New code added for v2:**
+- `blueccgl/augmentations/feature_masking.py` — random node feature dimension zeroing
+- `blueccgl/models/losses.py` — added `vicreg_variance_loss()` (Bardes et al., 2022)
+- `blueccgl/stages/train.py` — integrated feature masking into augmentor + variance loss into training loop + `variance` field in training log
+
+**Target metrics for v2:** alignment 0.6–0.85, effective rank >25, uniformity < -3.0
+
+**Embedding diagnostics (v1, 2026-03-23):**
+
+| Metric | Value | Status |
+|---|---|---|
+| Median cosine sim | 0.365 | OK (<0.5) |
+| Effective rank (SVD) | 14.9 / 64 | WARN — partial dimensional collapse |
+| Uniformity | -1.884 | WARN — moderate (should be <-3.0) |
+| Alignment | 0.997 | **CRITICAL** — augmentations too weak, model matches pairs trivially |
+| Top-5 variance ratio | 0.907 | 91% of variance in 5 dims |
+| Pool level 2 eff_dim | 3.65 / 128 | WARN — final DiffPool layer degenerate |
+| Intra vs inter-event gap | <0.06 | No event discrimination |
+
+**Verdict: MARGINAL → retrain required.** Root cause: augmentations don't destroy enough information; model solves pretext task via unchanged node feature statistics rather than learning structural cascade patterns.
 
 ### Sprint 5: Full Data Integration + Downstream Pipeline
 
@@ -764,13 +920,15 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 | 26 | Run `--stage cascade_construction` with full data | DONE | 39,983 cascades, ~3 min |
 | 27 | Run `--stage build_pyg_dataset` | DONE | cascade_dataset.pt (159.8 MB, 39,983 cascades). 2026-03-18 |
 | 28 | Run `--stage eda` | NOT STARTED | Stub — needs implementation. Unblocked |
-| 29 | Run `--stage train` | DONE | 100 epochs, best epoch 89 (loss 2.292). 2026-03-19 |
-| 30 | **Implement + run `--stage extract_embeddings`** | NOT STARTED | Stub — **UNBLOCKED** (train complete). Forward pass all cascades through best.pt, save [39983, 64] embeddings to HDF5 |
+| 29 | Run `--stage train` v1 | DONE | 50 epochs, τ=0.1. Diagnostics: MARGINAL (alignment=0.997, eff_rank=14.9). 2026-03-23 |
+| 29b | **Retrain v2** | READY | Stronger augmentations, feature masking, τ=0.3, VICReg variance reg, aux weight 0.5. Config committed. Archive old run first: `mv outputs/train/train outputs/train/run_v1_tau01` |
+| 30 | **Implement + run `--stage extract_embeddings`** | NOT STARTED | Stub — blocked on #29b. Forward pass all cascades through best.pt, save [39983, 64] embeddings to HDF5 |
 | 31 | **Implement + run `--stage cluster`** | NOT STARTED | Stub — blocked on #30. HDBSCAN grid search over min_cluster_size={50, 100, 200} |
 | 32 | **Implement + run `--stage evaluate`** | NOT STARTED | Stub — blocked on #31. Silhouette, DB, CH, DBCV + bootstrap CIs + UMAP plots |
-| 33 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub — blocked on #32. Each variant: train → extract → cluster → evaluate |
-| 34 | **Implement + run `--stage downstream`** | NOT STARTED | Stub — blocked on #30. Size + longevity prediction heads |
-| 35 | **Implement + run `--stage stability`** | NOT STARTED | Stub — blocked on #31. 10× 80% subsample ARI |
+| 33 | **Implement + run `--stage explain`** | NOT STARTED | New stage — blocked on #31. 4 sub-steps: probing classifiers, DiffPool assignment extraction, cluster statistical profiles, augmentation sensitivity analysis. Requires model changes: `explain()` method on BlueCCGL, `return_assignments` on DiffPool |
+| 34 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub — blocked on #32. Each variant: train → extract → cluster → evaluate |
+| 35 | **Implement + run `--stage downstream`** | NOT STARTED | Stub — blocked on #30. Size + longevity prediction heads |
+| 36 | **Implement + run `--stage stability`** | NOT STARTED | Stub — blocked on #31. 10× 80% subsample ARI |
 
 ---
 
@@ -782,7 +940,7 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 | **Disk space for full data** | — | — | — | RESOLVED — CPU-only torch + pip cache purge freed space. Streaming tar (no full extraction) keeps footprint manageable. ~15 GB free |
 | **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation | RESOLVED — 39,983 cascades at ≥10 threshold. Ample for HDBSCAN with min_cluster_size=50–200 |
 | **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool | MITIGATED — max_nodes=150 in DiffPool. P95 cascade size is 69 nodes, so cap is nearly lossless. Training stable so far |
-| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | NEEDS VALIDATION — training complete (loss 3.263 → 2.292). Loss well below log(64)=4.16 but plateaued early (~epoch 20). Must check cosine similarity histogram and embedding variance in extract_embeddings stage |
+| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | DIAGNOSED — v1 shows partial dimensional collapse (eff_rank=14.9/64) and near-perfect alignment (0.997). Not full collapse but MARGINAL. v2 retrain addresses with feature masking, VICReg variance reg, τ=0.3, stronger augmentations |
 | **Follower graph temporal confound** | Certain | Biased FOLLOWER labels for early cascades | Acknowledge as limitation; sensitivity analysis | OPEN |
 | **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | Try multiple `min_cluster_size` values; consider UMAP pre-reduction | OPEN |
 | **Cascade reconstruction heuristic too lossy** | Medium | Inaccurate cascade trees | Validate via known properties (e.g., branching factor distributions from literature) | OPEN |
@@ -809,9 +967,10 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 ## Key Decisions Still Open
 
 1. **DiffPool vs. SAGPool:** DiffPool completed training successfully (max_nodes=150). No instability observed. Decision: keep DiffPool.
-2. **Embedding quality validation:** Loss plateaued early (~epoch 20). Need to verify via cosine similarity histogram and UMAP whether embeddings are informative or partially collapsed. This is the **first diagnostic to run in Sprint 5**.
+2. **Embedding quality validation:** v1 diagnosed as MARGINAL (alignment=0.997, eff_rank=14.9). v2 retrain config committed. **Must re-run diagnostics after v2 retrain** and verify alignment < 0.85, eff_rank > 25, uniformity < -3.0 before proceeding to clustering.
 3. **HDBSCAN `min_cluster_size`:** Grid search over {50, 100, 200} planned. With 39,983 cascades and 69% baseline (27,572), event-specific cascades are smaller per event (930–3,338). May need min_cluster_size=50 to avoid overcollapsing.
 4. **Ablation training time budget:** Each A1–A5 variant requires a full training run (~2.8 hrs on CPU). All 5 = ~14 hrs. Consider reducing epochs for ablations (e.g., 50 epochs) if wall-clock is too tight.
+5. **Explain stage scope:** Core 4 sub-steps (probes, DiffPool assignments, cluster profiles, augmentation sensitivity) are planned. Optional extensions (GNNExplainer, PGExplainer, TCAV) depend on remaining time budget. TCAV has highest thesis novelty but requires concept set curation (~6h). Decision deferred until after clustering results are available.
 
 ---
 

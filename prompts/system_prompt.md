@@ -59,6 +59,7 @@ python run_pipeline.py \
 | `extract_embeddings` | Run trained encoder over full dataset; save embedding matrix to HDF5 |
 | `cluster` | Apply HDBSCAN over extracted embeddings; grid search `min_cluster_size`; save cluster assignments |
 | `evaluate` | Compute clustering metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz, DBCV) with bootstrap CIs; generate UMAP plots |
+| `explain` | Multi-layer XAI: probing classifiers on embeddings, DiffPool assignment extraction, cluster statistical profiles + significance tests, augmentation sensitivity analysis. Outputs per-archetype interpretability report |
 | `ablation` | Re-run `train → extract_embeddings → cluster → evaluate` for each ablation variant (A1–A5); outputs comparative metrics table |
 | `downstream` | Fine-tune encoder on cascade size and longevity prediction; evaluate against baselines |
 | `stability` | 10× 80% subsample stability analysis; report ARI and metric variance across runs |
@@ -97,22 +98,27 @@ model:
   embedding_dim: 64
   pool: diffpool               # Options: diffpool | mean (for A3 ablation)
   pool_ratios: [0.5, 0.25]
-  diffpool_aux_weight: 0.1
+  diffpool_aux_weight: 0.5     # Raised from 0.1 to keep DiffPool assignments meaningful
   use_sentiment: true          # Set false for A4 ablation
 
 augmentation:
   strategy: feed_aware         # Options: feed_aware | random (for A2 ablation)
-  follower_retain_ratio: 0.7
-  temporal_prefix_ratio: 0.6
-  bridge_remove_ratio: 0.3
+  follower_retain_ratio: 0.5   # Lowered from 0.7 — stronger structural perturbation
+  temporal_prefix_ratio: 0.4   # Lowered from 0.6 — forces learning beyond temporal shortcuts
+  bridge_remove_ratio: 0.5     # Raised from 0.3 — removes more non-follower entry nodes
+  feature_mask_ratio: 0.25     # Randomly zero 25% of node feature dims per view
   hard_negatives: true
 
 training:
-  epochs: 100
+  epochs: 50
   batch_size: 64
   lr: 1e-3
-  temperature: 0.5             # InfoNCE tau; swept over [0.1, 0.3, 0.5, 0.7]
+  lr_schedule: cosine
+  lr_min: 1e-5
+  warmup_epochs: 5
+  temperature: 0.3             # InfoNCE tau; raised from 0.1 to prevent pretext saturation
   grad_clip_norm: 1.0
+  variance_weight: 0.1         # VICReg-style variance regularisation
   checkpoint_every: 10         # Epochs
 
 clustering:
@@ -123,6 +129,16 @@ evaluation:
   bootstrap_n: 1000
   stability_subsamples: 10
   stability_ratio: 0.8
+
+explain:
+  n_representatives_per_cluster: 20
+  run_probes: true
+  run_diffpool_analysis: true
+  run_augmentation_sensitivity: true
+  run_cluster_profiles: true
+  probe_properties: [cascade_depth, cascade_breadth, wiener_index,
+                     follower_edge_ratio, cascade_size, event_window]
+  figures_dpi: 300
 ```
 
 ### Stage Dependency Graph
@@ -137,6 +153,7 @@ nlp_filter
                             └── extract_embeddings
                                     └── cluster
                                             └── evaluate
+                                                    ├── explain (probes, DiffPool assignments, cluster profiles, augmentation sensitivity)
                                                     ├── ablation (loops train→evaluate for A1–A5)
                                                     ├── downstream
                                                     └── stability
