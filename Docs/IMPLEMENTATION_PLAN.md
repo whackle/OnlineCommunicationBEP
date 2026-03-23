@@ -1,6 +1,6 @@
 # BlueCCGL — Full Implementation Plan
 
-## Current State Assessment (Updated 2026-03-19)
+## Current State Assessment (Updated 2026-03-23)
 
 | Asset | Status |
 |-------|--------|
@@ -12,7 +12,8 @@
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
 | **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. Stages `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, and `train` fully implemented and executed. Downstream stages (`extract_embeddings`, `cluster`, `evaluate`, `ablation`, `downstream`, `stability`, `eda`) are stubs requiring implementation |
-| **Training** | DONE — contrastive pre-training on full 39,983 cascades. 100 epochs completed (loss: 3.263 → 2.292). Best epoch 89 (loss 2.292). ~100 s/epoch on CPU. Checkpoints in `outputs/train/` |
+| **Training v1** | DONE — 50 epochs, τ=0.1, cosine LR. Loss 1.589→0.035. Diagnostics: MARGINAL — alignment=0.997 (augmentations too weak), eff_rank=14.9/64 (dimensional collapse), uniformity=-1.88. Archived as `outputs/train/run_v1_tau01/` |
+| **Training v2** | PENDING RETRAIN — stronger augmentations (retain 0.5/prefix 0.4/bridge 0.5), feature masking 25%, τ=0.3, VICReg variance reg (0.1), DiffPool aux weight 0.5. Target: alignment 0.6–0.85, eff_rank >25, uniformity <-3.0 |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
 
 ### Progress Summary
@@ -22,8 +23,8 @@
 | Sprint 1: Scaffolding | DONE | All package structure, CLI, config, pipeline orchestrator, seed, gitignore |
 | Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
 | Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
-| Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented; training complete (100 epochs, best epoch 89) |
-| Sprint 5: Full Data Integration | DONE through train | Training complete (100 epochs). Stages 30–35 (extract → evaluate → ablation → downstream → stability) need implementation |
+| Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented; training v1 complete (50 epochs) |
+| Sprint 5: Full Data Integration | IN PROGRESS | Training v1 diagnostics: MARGINAL (alignment=0.997, eff_rank=14.9). Retrain v2 ready with stronger augmentations, feature masking, τ=0.3, VICReg variance reg. Stages 30–35 (extract → evaluate → ablation → downstream → stability) need implementation |
 
 ---
 

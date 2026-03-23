@@ -25,7 +25,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from blueccgl.models.blueccgl import BlueCCGL
-from blueccgl.models.losses import info_nce_loss
+from blueccgl.models.losses import info_nce_loss, vicreg_variance_loss
 
 
 def run(
@@ -81,6 +81,7 @@ def run(
     temperature = tcfg.get("temperature", 0.5)
     grad_clip = tcfg.get("grad_clip_norm", 1.0)
     aux_weight = cfg["model"].get("diffpool_aux_weight", 0.1)
+    variance_weight = tcfg.get("variance_weight", 0.0)
     ckpt_every = tcfg.get("checkpoint_every", 10)
     log_grad_every = tcfg.get("log_grad_norm_every", 50)
 
@@ -119,6 +120,7 @@ def run(
         epoch_loss = 0.0
         epoch_contrast = 0.0
         epoch_aux = 0.0
+        epoch_var = 0.0
         n_batches = 0
         grad_norms: list[float] = []
 
@@ -143,7 +145,8 @@ def run(
             # Loss
             contrastive = info_nce_loss(proj1, proj2, temperature)
             aux = aux_weight * (aux1 + aux2) / 2
-            loss = contrastive + aux
+            var_loss = variance_weight * vicreg_variance_loss(proj1, proj2) if variance_weight > 0 else torch.tensor(0.0, device=dev)
+            loss = contrastive + aux + var_loss
 
             # Backward
             optimizer.zero_grad()
@@ -154,6 +157,7 @@ def run(
             epoch_loss += loss.item()
             epoch_contrast += contrastive.item()
             epoch_aux += aux.item()
+            epoch_var += var_loss.item() if isinstance(var_loss, torch.Tensor) else var_loss
             n_batches += 1
 
             if batch_idx % log_grad_every == 0:
@@ -173,6 +177,7 @@ def run(
         avg_loss = epoch_loss / max(n_batches, 1)
         avg_contrast = epoch_contrast / max(n_batches, 1)
         avg_aux = epoch_aux / max(n_batches, 1)
+        avg_var = epoch_var / max(n_batches, 1)
         current_lr = optimizer.param_groups[0]["lr"]
 
         epoch_log = {
@@ -180,6 +185,7 @@ def run(
             "loss": round(avg_loss, 5),
             "contrastive": round(avg_contrast, 5),
             "aux": round(avg_aux, 5),
+            "variance": round(avg_var, 5),
             "lr": current_lr,
             "grad_norm_mean": round(sum(grad_norms) / max(len(grad_norms), 1), 4),
             "time_s": round(time.time() - t_start, 1),
@@ -240,6 +246,11 @@ def run(
 def _build_augmentor(acfg: dict):
     """Return a callable (Data) → (view1, view2)."""
     min_nodes = acfg.get("min_nodes_after_aug", 3)
+    feat_mask_ratio = acfg.get("feature_mask_ratio", 0.0)
+    feat_dim = 6  # temporal, sent_label, sent_score, depth, in_deg, out_deg
+
+    if feat_mask_ratio > 0:
+        from blueccgl.augmentations.feature_masking import mask_features
 
     if acfg.get("strategy", "feed_aware") == "feed_aware":
         from blueccgl.augmentations.follower_subgraph import augment as aug_A
@@ -264,10 +275,14 @@ def _build_augmentor(acfg: dict):
         ]
 
     def pair(data):
-        """Apply two different random strategies; fall back to original."""
+        """Apply two different random strategies + feature masking; fall back to original."""
         s1, s2 = random.sample(range(len(strategies)), k=min(2, len(strategies)))
         v1 = strategies[s1](data) or data
         v2 = strategies[s2](data) or data
+        # Apply independent feature masking to each view
+        if feat_mask_ratio > 0:
+            v1 = mask_features(v1, mask_ratio=feat_mask_ratio, feature_dim=feat_dim)
+            v2 = mask_features(v2, mask_ratio=feat_mask_ratio, feature_dim=feat_dim)
         return v1, v2
 
     return pair

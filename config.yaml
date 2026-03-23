@@ -28,15 +28,16 @@ model:
   embedding_dim: 64
   pool: diffpool                      # options: diffpool | mean (ablation A3)
   pool_ratios: [0.5, 0.25]
-  diffpool_aux_weight: 0.1
+  diffpool_aux_weight: 0.5            # was 0.1 — keep DiffPool assignments meaningful
   diffpool_max_nodes: 1000            # cap for DiffPool memory; larger cascades use SAGPool
   use_sentiment: true                 # set false for ablation A4
 
 augmentation:
   strategy: feed_aware                # options: feed_aware | random (ablation A2)
-  follower_retain_ratio: 0.7
-  temporal_prefix_ratio: 0.6
-  bridge_remove_ratio: 0.3
+  follower_retain_ratio: 0.5          # was 0.7 — stronger structural perturbation
+  temporal_prefix_ratio: 0.4          # was 0.6 — forces learning beyond temporal shortcuts
+  bridge_remove_ratio: 0.5            # was 0.3 — removes more non-follower entry nodes
+  feature_mask_ratio: 0.25            # NEW: randomly zero 25% of node feature dims per view
   min_nodes_after_aug: 3             # guard: re-augment if result has < this many nodes
   hard_negatives: true
 
@@ -47,10 +48,11 @@ training:
   lr_schedule: cosine                 # options: cosine | constant
   lr_min: 1.0e-5
   warmup_epochs: 5
-  temperature: 0.1                    # InfoNCE tau; lowered from 0.5 — sharper contrastive signal
+  temperature: 0.3                    # InfoNCE tau; raised from 0.1 — harder contrastive task, prevents pretext saturation
   grad_clip_norm: 1.0
   checkpoint_every: 10               # epochs between checkpoints
   log_grad_norm_every: 50            # batches between gradient norm logs
+  variance_weight: 0.1               # NEW: VICReg-style variance regularisation weight
   early_stopping_patience: 15        # epochs without improvement before stopping
   early_stopping_min_delta: 0.0001   # minimum loss decrease to count as improvement
 

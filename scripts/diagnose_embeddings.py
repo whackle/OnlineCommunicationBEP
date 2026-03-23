@@ -78,7 +78,7 @@ def main():
     print("[diag] Loading model from best.pt...")
     model = BlueCCGL(cfg)
     ckpt = torch.load(
-        ROOT / "outputs" / "train" / "checkpoints" / "best.pt",
+        ROOT / "outputs" / "train" / "train" / "checkpoints" / "best.pt",
         weights_only=False,
         map_location="cpu",
     )
@@ -110,7 +110,7 @@ def main():
     # ── 7. Report ─────────────────────────────────────────────────────────
     report = {
         "timestamp": datetime.now().isoformat(),
-        "checkpoint": "outputs/train/checkpoints/best.pt",
+        "checkpoint": "outputs/train/train/checkpoints/best.pt",
         "checkpoint_epoch": ckpt.get("epoch"),
         "checkpoint_loss": ckpt.get("loss"),
         "n_cascades": N,
