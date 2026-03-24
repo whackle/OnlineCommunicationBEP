@@ -1,6 +1,6 @@
 # BlueCCGL — Full Implementation Plan
 
-## Current State Assessment (Updated 2026-03-23)
+## Current State Assessment (Updated 2026-03-24)
 
 | Asset | Status |
 |-------|--------|
@@ -11,7 +11,7 @@
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. Stages `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, and `train` fully implemented and executed. Downstream stages (`extract_embeddings`, `cluster`, `evaluate`, `ablation`, `downstream`, `stability`, `eda`) are stubs requiring implementation |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. Stages `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, and `explain` fully implemented. `explain` stage added to `ALL_STAGES`, `STAGE_CHECKPOINTS`, `STAGE_DEPS`. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
 | **Training v1** | DONE — 50 epochs, τ=0.1, cosine LR. Loss 1.589→0.035. Diagnostics: MARGINAL — alignment=0.997 (augmentations too weak), eff_rank=14.9/64 (dimensional collapse), uniformity=-1.88. Archived as `outputs/train/run_v1_tau01/` |
 | **Training v2** | PENDING RETRAIN — stronger augmentations (retain 0.5/prefix 0.4/bridge 0.5), feature masking 25%, τ=0.3, VICReg variance reg (0.1), DiffPool aux weight 0.5. Target: alignment 0.6–0.85, eff_rank >25, uniformity <-3.0 |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
@@ -24,7 +24,7 @@
 | Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
 | Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
 | Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented; training v1 complete (50 epochs) |
-| Sprint 5: Full Data Integration | IN PROGRESS | Training v1 diagnostics: MARGINAL (alignment=0.997, eff_rank=14.9). Retrain v2 ready with stronger augmentations, feature masking, τ=0.3, VICReg variance reg. Stages 30–35 (extract → evaluate → ablation → downstream → stability) need implementation |
+| Sprint 5: Full Data Integration | IN PROGRESS | Training v2 retraining on VM. Stages `extract_embeddings`, `cluster`, `evaluate`, `explain` fully implemented (2026-03-24). Model surgery: `diffpool.py` `return_assignments` flag + `BlueCCGL.explain()` method added. Remaining: run downstream pipeline once v2 checkpoint arrives; implement `ablation`, `downstream`, `stability` stubs |
 
 ---
 
@@ -139,8 +139,10 @@ hdbscan, scikit-learn, umap-learn
 # Logging/Tracking
 wandb (optional), tqdm, rich (for CLI output)
 
-# Evaluation
+# Evaluation + XAI
 scipy, matplotlib, seaborn
+h5py                    # HDF5 storage for embeddings + DiffPool assignments (added 2026-03-24)
+networkx                # Cascade tree visualisation in explain stage (added 2026-03-24)
 
 # Testing
 pytest
@@ -564,125 +566,102 @@ Training loop:
 2. **Learning rate schedule:** Start with `lr=1e-3`, cosine annealing to `1e-5` over 100 epochs. If loss plateaus early, consider warm-up (linear warm-up for 5 epochs).
 3. **Gradient explosion from DiffPool:** DiffPool's dense operations can produce large gradients. Gradient clipping is essential. Monitor gradient norms — if consistently at the clip value, the effective learning rate is being capped.
 
-### Step 4.2 — Extract Embeddings Stage (`blueccgl/stages/extract_embeddings.py`)
+### Step 4.2 — Extract Embeddings Stage (`blueccgl/stages/extract_embeddings.py`) — DONE (2026-03-24)
 
 **Stage:** `--stage extract_embeddings`
 **Reads:** `{output_dir}/train/checkpoints/best.pt`, `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
-**Writes:** `{output_dir}/extract_embeddings/embeddings.h5`
+**Writes:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`
 
-1. Load trained model (eval mode, no augmentation).
-2. Forward pass all cascades.
-3. Save: `embeddings` array `[N_cascades, embedding_dim]`, `cascade_ids`, `event_windows`.
-4. Use HDF5 for storage (efficient for large matrices + metadata).
+**Implementation:** Load `best.pt` via `BlueCCGL(cfg)` + `load_state_dict()`. Inference with `model.encode()`, `batch_size=32`, `torch.no_grad()`. Saves full cascade metadata (depth, breadth, wiener_index, follower_edge_ratio, sentiment_composition, event_window) to `cascade_index.parquet` alongside the HDF5 embedding matrix. Sanity-checks embedding norm variance; warns if `std(norms) < 0.01` (potential collapse).
 
 **Checkpoint validation:**
-- Embedding matrix shape: `[N_cascades, 64]`.
-- No NaN or Inf values.
-- Variance of embeddings > 0 (no collapse).
-- Cosine similarity histogram: should be roughly centred, not peaked at 1.0.
+- Embedding matrix shape: `[N_cascades, 64]` (gzip-compressed in HDF5).
+- `cascade_index.parquet` row count matches embedding count.
+- Embedding norm mean/std/min/max printed for quick sanity check.
 
-### Step 4.3 — Cluster Stage (`blueccgl/stages/cluster.py`)
+### Step 4.3 — Cluster Stage (`blueccgl/stages/cluster.py`) — DONE (2026-03-24)
 
 **Stage:** `--stage cluster`
-**Reads:** `{output_dir}/extract_embeddings/embeddings.h5`
-**Writes:** `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/hdbscan_results.json`
+**Reads:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`
+**Writes:** `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/grid_search_results.json`
 
-1. Load embeddings.
-2. For each `min_cluster_size` in `[50, 100, 200]`:
-   a. Fit HDBSCAN.
-   b. Record: cluster labels, noise fraction, number of clusters, DBCV score.
-3. Select best `min_cluster_size` by DBCV (or manual inspection).
-4. Save cluster assignments for the best configuration.
+**Implementation:** Grid search over `min_cluster_size ∈ {50, 100, 200}` (configurable). Silhouette score on non-noise points (capped at 5000 samples) used to select best config. Configs producing >30% noise are treated as degenerate and scored -1.0 (not selected unless all configs are degenerate). Falls back to smallest `min_cluster_size` if all configs are degenerate. Saves `cascade_id → cluster_label` Parquet (noise = label -1, preserved). `grid_search_results.json` records all grid metrics + which config was selected.
 
 **Potential issues:**
 1. **High noise fraction (>30%):** Indicates embeddings don't form well-separated clusters. Investigate: (a) embedding quality (collapse?), (b) augmentation quality, (c) cascade homogeneity (all cascades look similar).
 2. **Too few clusters (<3):** HDBSCAN may find only 1–2 clusters + noise. Lower `min_cluster_size`. If still few, try reducing `min_samples`.
 3. **Too many clusters (>20):** May indicate fragmentation. Increase `min_cluster_size`.
 
-### Step 4.4 — Evaluate Stage (`blueccgl/stages/evaluate.py`)
+### Step 4.4 — Evaluate Stage (`blueccgl/stages/evaluate.py`) — DONE (2026-03-24)
 
 **Stage:** `--stage evaluate`
-**Reads:** `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/extract_embeddings/embeddings.h5`
-**Writes:** `{output_dir}/evaluate/metrics.json`, `{output_dir}/evaluate/umap_*.png`, `{output_dir}/evaluate/archetype_profiles.json`
+**Reads:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`, `{output_dir}/cluster/cluster_assignments.parquet`
+**Writes:** `{output_dir}/evaluate/metrics.json`, `{output_dir}/evaluate/umap_figure.png`, `{output_dir}/evaluate/umap_coords.parquet`
 
-1. Compute metrics (excluding noise points):
-   - Silhouette Score
-   - Davies-Bouldin Index
-   - Calinski-Harabasz Index
-   - DBCV
-2. Bootstrap confidence intervals (1000 resamples) for each metric.
-3. UMAP projection (2D) of embeddings, coloured by:
-   - Cluster assignment
-   - Event window
-   - Sentiment composition (dominant sentiment)
-   - Follower-edge ratio (continuous colour scale)
-4. Archetype characterisation: for each cluster, compute mean ± std of all structural and sentiment features.
+**Implementation:** Bootstrap (n=1000, capped at 5000-sample Silhouette) for Silhouette, Davies-Bouldin, Calinski-Harabasz. DBCV via `hdbscan.validity_index` (capped at 100 bootstrap iterations due to cost). All metrics report mean ± std + 95% CI. UMAP figure has 2 panels: (A) coloured by cluster label, (B) coloured by event_window. `umap_coords.parquet` saves 2D coordinates alongside `cascade_id` for reuse in explain stage without re-running UMAP.
 
-### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`)
+### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`) — DONE (2026-03-24)
 
 **Stage:** `--stage explain`
 **Reads:**
 - `{output_dir}/train/checkpoints/best.pt`
 - `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
 - `{output_dir}/extract_embeddings/embeddings.h5`
+- `{output_dir}/extract_embeddings/cascade_index.parquet`
 - `{output_dir}/cluster/cluster_assignments.parquet`
 **Writes:** `{output_dir}/explain/` (see output structure below)
 
-**Dependency:** `cluster` (runs after clustering assigns archetypes)
+**Dependency:** `evaluate` (added to pipeline dependency chain 2026-03-24)
 
-Multi-layer explainability pipeline with 4 sub-steps, each answering a distinct question about discovered cascade archetypes.
+Multi-layer explainability pipeline with **5 sub-steps** (4 from plan + 1 new), each answering a distinct question about discovered cascade archetypes.
 
-#### Sub-step 5.1 — Probing Classifiers (What is encoded in the embeddings?)
+#### Sub-step 5.1 — Probing Classifiers (What is encoded in the embeddings?) — DONE
 
-Train lightweight linear classifiers (logistic regression / shallow MLP) on frozen 64-dim embeddings to predict interpretable graph properties already stored on each `Data` object: `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `sentiment_composition`, `cascade_size`, `event_window`.
+Train `Ridge` regression (continuous) or `LogisticRegression` (categorical) on frozen 64-dim embeddings with 5-fold CV. Properties: `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `cascade_size`, `event_window`. Reports R² (regression) or balanced accuracy (classification), with bootstrap CIs (n=200) globally and per-cluster breakdown. Uses 5-fold CV for clusters <100 cascades; flags per output.
 
-**Output:** `explain/probe_results.json` — R²/accuracy per property, overall and per-cluster.
+**Output:** `explain/probe_results.json` — R²/accuracy per property, overall and per-cluster. `explain/figures/probe_heatmap.png` — property × cluster seaborn heatmap.
 
-**Interpretation:** If wiener_index is predictable with R²=0.87 but sentiment gives R²=0.12, the contrastive objective has encoded structural virality but not sentiment dynamics. Per-cluster breakdown characterises each archetype in terms of what the model sees in it.
+**RQ connection:** High `follower_edge_ratio` R² → model encodes SRQ3 signal. High `event_window` accuracy → model captures SRQ1/SRQ2 signal.
 
 **Key reference:** Alain & Bengio (2017). "Understanding intermediate layers using linear classifier probes."
 
-#### Sub-step 5.2 — DiffPool Assignment Extraction (What structural roles does the model learn?)
+#### Sub-step 5.2 — DiffPool Assignment Extraction (What structural roles does the model learn?) — DONE
 
-The `HierarchicalDiffPool` already computes soft assignment matrices `s1` (Level 1) and `s2` (Level 2) during forward pass — this is free explainability currently being discarded.
+Runs `model.explain()` over each cascade individually (`batch_size=1`, critical to avoid N_max padding contaminating the real-node assignment slice). Computes per-node Level-1 assignment entropy `H = -∑ softmax(s1)·log(softmax(s1))` and fraction of follower-typed edge targets assigned to the dominant super-node. **Memory-efficient:** only aggregated statistics stored per cascade (no raw `s1` matrices). Results grouped by HDBSCAN cluster.
 
-**Implementation:**
-1. Add `return_assignments=False` parameter to `HierarchicalDiffPool.forward()` in [diffpool.py](blueccgl/models/diffpool.py). When True, also return `s1`, `s2`.
-2. Add `explain(batch)` method to `BlueCCGL` in [blueccgl.py](blueccgl/models/blueccgl.py) that returns `(embedding, s1, s2, node_embeddings_h)`.
-3. Run inference over all cascades, extracting assignment matrices.
-4. For each cascade: compute assignment entropy per node (high entropy = ambiguous role, low = clear role), hard partition via argmax, super-node feature profiles (mean depth, sentiment, degree of member nodes).
-5. Aggregate super-node characterisations per HDBSCAN cluster.
+**Output:** `explain/diffpool_assignments.h5` — `mean_entropy_l1 [N_cascades]`, `follower_in_dominant_pool [N_cascades]`. `explain/figures/diffpool_analysis.png` — per-cluster entropy + follower concentration bars.
 
-**Output:** `explain/diffpool_assignments.h5` — assignment matrices, entropy maps, super-node profiles.
-
-**Interpretation:** "In Archetype A, DiffPool consistently groups high-degree early adopters into super-node 0 and sentiment-polarised leaf nodes into super-node 1." Visualise as node-coloured cascade tree layouts.
+**RQ connection:** If follower nodes consistently land in the dominant super-node with low entropy → R-GCN edge-type encoding is being utilised by pooling (validates Extension 2).
 
 **Key reference:** Ying et al. (2018). "Hierarchical Graph Representation Learning with Differentiable Pooling."
 
-#### Sub-step 5.3 — Cluster Statistical Profiles (What distinguishes archetypes?)
+#### Sub-step 5.3 — Cluster Statistical Profiles (What distinguishes archetypes?) — DONE
 
-For each HDBSCAN cluster, compute summary statistics of all graph-level properties and run statistical tests.
+Per-cluster mean ± std / median / IQR for `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `cascade_size`, `sentiment_neg/neu/pos`. Between-cluster Kruskal-Wallis per property + pairwise Mann-Whitney U with Bonferroni correction. PCA on cluster centroids + property correlations for discriminative dimension identification.
 
-**Implementation:**
-1. Per-cluster: mean ± std of `cascade_depth`, `cascade_breadth`, `wiener_index`, `follower_edge_ratio`, `sentiment_composition` (3 dims), `cascade_size`.
-2. Between-cluster: Kruskal-Wallis test per property, then pairwise Mann-Whitney U with Bonferroni correction.
-3. Discriminative embedding dimensions: PCA on cluster centroids → identify which of the 64 dims have highest between-cluster variance → correlate with probing classifier weights from Sub-step 5.1.
+**RQ-specific additions beyond original plan:**
+- **Archetype × event_window cross-tabulation** (chi-squared test for independence; reports expected-cell-count warnings for sparse event windows) → SRQ1, SRQ2
+- **Temporal evolution plot** (archetype prevalence fraction per event window, line chart) → SRQ1
+- **Follower edge ratio violin plots per archetype** → SRQ3
+- **Sentiment composition radar chart per archetype** → SRQ4
 
-**Output:** `explain/cluster_profiles.json` — per-archetype profiles, pairwise significance tables, discriminative dimensions.
+**Output:** `explain/cluster_profiles.json` + `explain/figures/cluster_radar_profiles.png`, `archetype_event_heatmap.png`, `follower_ratio_violins.png`, `temporal_evolution.png`.
 
 **Interpretation:** "Archetype A (n=342): deep chains (depth=8.2±2.1), low follower ratio (0.23), negative sentiment dominant. Archetype B (n=189): shallow star-bursts (depth=2.1, breadth=45.3), high follower ratio (0.78), neutral sentiment."
 
-#### Sub-step 5.4 — Augmentation Sensitivity Analysis (What is structurally defining for each archetype?)
+#### Sub-step 5.4 — Augmentation Sensitivity Analysis (What is structurally defining for each archetype?) — DONE
 
-The three feed-aware augmentations each destroy specific information. By measuring which augmentation changes the embedding most, we reveal what the model considers structurally essential.
+Samples `n_representatives_per_cluster` (default 20) cascades per cluster. For each, applies each augmentation strategy with a **fixed per-cascade seed** (`seed = cascade_id * 137 % 2³¹`) to ensure reproducibility. Computes `‖embed(original) − embed(augmented)‖₂` per augmentation type. Aggregates mean ± std per cluster.
 
-**Implementation:**
-1. For each cascade in a sample (e.g., 500 per cluster): apply each augmentation separately, compute `||embed(original) - embed(augmented)||₂`.
-2. Aggregate per cluster: mean sensitivity to follower_subgraph vs. temporal_prefix vs. bridge_removal.
+**Output:** `explain/augmentation_sensitivity.json` + `explain/figures/augmentation_sensitivity_bars.png` — grouped bar chart (3 bars per cluster).
 
-**Output:** `explain/augmentation_sensitivity.json` — per-cluster sensitivity scores per augmentation type.
+**Interpretation:** High sensitivity to `follower_subgraph` removal → archetype is defined by follower structure (organic virality). High sensitivity to `bridge_removal` → archetype relies on non-follower entry points (algorithmic amplification). Validates Extension 1 (feed-aware augmentations) against ablation A2 (generic augmentation).
 
-**Interpretation:** "Cluster 3 is highly sensitive to bridge_removal (non-follower entry nodes are critical) but invariant to follower_subgraph → this archetype is defined by cross-community bridges, not follower structure."
+#### Sub-step 5.5 — Representative Cascade Visualisations (NEW — 2026-03-24)
+
+Selects top-5 cascades per cluster (closest to centroid in embedding space). Renders each as a tree plot with 3 colour panels: (A) edge type (follower/non-follower/unknown), (B) depth, (C) sentiment label. Uses Reingold-Tilford hierarchical layout via networkx BFS tree.
+
+**Output:** `explain/figures/archetypes/cluster_{k}_rep_{i}.png` per representative cascade. Requires `networkx` (added to `install.sh`).
 
 #### Optional Extensions (time permitting)
 
@@ -701,34 +680,46 @@ The three feed-aware augmentations each destroy specific information. By measuri
 - Yuan et al. (2022). "Explainability in GNNs: A Taxonomic Survey." *TPAMI.*
 - Magister et al. (2021). "GCExplainer: Concept-based Explanations for GNNs."
 
-#### Config Addition
+#### Config (deployed in `config.yaml` — 2026-03-24)
 
 ```yaml
 explain:
-  n_representatives_per_cluster: 20     # sample size for per-instance analyses
+  n_representatives_per_cluster: 20     # sample size for aug sensitivity + representative viz
   run_probes: true
   run_diffpool_analysis: true
   run_augmentation_sensitivity: true
   run_cluster_profiles: true
-  probe_properties: [cascade_depth, cascade_breadth, wiener_index,
-                     follower_edge_ratio, cascade_size, event_window]
+  run_representative_viz: true          # cascade tree plots per archetype (requires networkx)
+  probe_properties:
+    - cascade_depth
+    - cascade_breadth
+    - wiener_index
+    - follower_edge_ratio
+    - cascade_size
+    - event_window
   figures_dpi: 300
+  probe_bootstrap_n: 200                # bootstrap iterations for probe CIs (cheaper than eval bootstrap)
 ```
 
-#### Output Structure
+#### Output Structure (deployed)
 
 ```
 outputs/explain/
-  probe_results.json                    # R²/accuracy per property per cluster
-  cluster_profiles.json                 # Summary stats + statistical tests + discriminative dims
-  augmentation_sensitivity.json         # Per-cluster sensitivity to each augmentation
-  diffpool_assignments.h5               # Assignment matrices, entropy, super-node profiles
+  probe_results.json                    # R²/accuracy per property per cluster + bootstrap CIs
+  cluster_profiles.json                 # Summary stats + Kruskal-Wallis + Mann-Whitney + PCA + cross-tab
+  augmentation_sensitivity.json         # Per-cluster sensitivity to each augmentation type
+  diffpool_assignments.h5               # Per-cascade entropy + follower-in-dominant-pool fraction
   explanation_report.json               # Combined summary (stage checkpoint)
   figures/
-    cluster_radar_profiles.png          # Radar charts per archetype
-    probe_heatmap.png                   # Property × cluster R² heatmap
-    diffpool_prototype_graphs.png       # Representative cascade per cluster with DiffPool coloring
-    augmentation_sensitivity_bars.png   # Per-cluster bar chart of sensitivity per augmentation
+    probe_heatmap.png                   # Property × cluster R²/accuracy seaborn heatmap
+    diffpool_analysis.png               # Per-cluster entropy + follower concentration bars
+    cluster_radar_profiles.png          # Normalised structural property radar chart per archetype
+    archetype_event_heatmap.png         # Archetype × event_window fraction heatmap (SRQ1, SRQ2)
+    follower_ratio_violins.png          # follower_edge_ratio violin plots per archetype (SRQ3)
+    temporal_evolution.png              # Archetype prevalence line chart over conflict timeline (SRQ1)
+    augmentation_sensitivity_bars.png   # Per-cluster grouped bar chart (SRQ3 + MRQ3)
+    archetypes/
+      cluster_{k}_rep_{i}.png           # Representative cascade trees with 3 colour panels
 ```
 
 #### Failure Mode Audit
@@ -921,11 +912,11 @@ After diagnostics revealed the v1 model was MARGINAL (see below), the following 
 | 27 | Run `--stage build_pyg_dataset` | DONE | cascade_dataset.pt (159.8 MB, 39,983 cascades). 2026-03-18 |
 | 28 | Run `--stage eda` | NOT STARTED | Stub — needs implementation. Unblocked |
 | 29 | Run `--stage train` v1 | DONE | 50 epochs, τ=0.1. Diagnostics: MARGINAL (alignment=0.997, eff_rank=14.9). 2026-03-23 |
-| 29b | **Retrain v2** | READY | Stronger augmentations, feature masking, τ=0.3, VICReg variance reg, aux weight 0.5. Config committed. Archive old run first: `mv outputs/train/train outputs/train/run_v1_tau01` |
-| 30 | **Implement + run `--stage extract_embeddings`** | NOT STARTED | Stub — blocked on #29b. Forward pass all cascades through best.pt, save [39983, 64] embeddings to HDF5 |
-| 31 | **Implement + run `--stage cluster`** | NOT STARTED | Stub — blocked on #30. HDBSCAN grid search over min_cluster_size={50, 100, 200} |
-| 32 | **Implement + run `--stage evaluate`** | NOT STARTED | Stub — blocked on #31. Silhouette, DB, CH, DBCV + bootstrap CIs + UMAP plots |
-| 33 | **Implement + run `--stage explain`** | NOT STARTED | New stage — blocked on #31. 4 sub-steps: probing classifiers, DiffPool assignment extraction, cluster statistical profiles, augmentation sensitivity analysis. Requires model changes: `explain()` method on BlueCCGL, `return_assignments` on DiffPool |
+| 29b | **Retrain v2** | IN PROGRESS (VM) | Stronger augmentations, feature masking, τ=0.3, VICReg variance reg, aux weight 0.5. Config committed. Old run archived to `outputs/train/run_v1_tau01`. No code restart needed — model surgery changes (diffpool.py, blueccgl.py) are inference-only |
+| 30 | **Implement `--stage extract_embeddings`** | DONE (2026-03-24) | Full implementation. Saves `embeddings.h5` + `cascade_index.parquet`. Norm variance sanity check. Awaiting v2 checkpoint to run |
+| 31 | **Implement `--stage cluster`** | DONE (2026-03-24) | Full implementation. HDBSCAN grid search with Silhouette selection, degenerate-config rejection. Awaiting v2 checkpoint to run |
+| 32 | **Implement `--stage evaluate`** | DONE (2026-03-24) | Full implementation. Bootstrap CIs on 4 metrics, UMAP 2-panel figure, `umap_coords.parquet` saved for explain. Awaiting v2 checkpoint to run |
+| 33 | **Implement `--stage explain`** | DONE (2026-03-24) | Full implementation. 5 sub-steps: probing, DiffPool extraction, cluster profiles (+4 new RQ-aligned figures), augmentation sensitivity, representative cascade viz. Model surgery: `diffpool.py` return_assignments + `blueccgl.py` explain() added. `explain` added to pipeline dependency chain. `h5py`, `networkx` added to `install.sh`. Awaiting v2 checkpoint to run |
 | 34 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub — blocked on #32. Each variant: train → extract → cluster → evaluate |
 | 35 | **Implement + run `--stage downstream`** | NOT STARTED | Stub — blocked on #30. Size + longevity prediction heads |
 | 36 | **Implement + run `--stage stability`** | NOT STARTED | Stub — blocked on #31. 10× 80% subsample ARI |
