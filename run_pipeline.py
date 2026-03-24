@@ -169,6 +169,10 @@ def _run_stage(stage: str, cfg: dict, output_dir: Path, seed: int, device: str, 
         from blueccgl.stages.evaluate import run
         run(cfg, output_dir)
 
+    elif stage == "explain":
+        from blueccgl.stages.explain import run
+        run(cfg, output_dir, device)
+
     elif stage == "ablation":
         from blueccgl.stages.ablation import run
         run(cfg, output_dir, device, seed)

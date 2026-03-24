@@ -47,6 +47,8 @@ pip install \
     tqdm==4.67.1 \
     rich==14.0.0 \
     scipy==1.15.3 \
+    h5py==3.16.0 \
+    networkx==3.6.1 \
     pytest==8.3.5
 
 echo "[install] Done. torch==${TORCH_VER}+${WHEEL}"

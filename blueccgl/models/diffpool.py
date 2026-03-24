@@ -56,18 +56,26 @@ class HierarchicalDiffPool(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         batch: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return_assignments: bool = False,
+    ) -> tuple:
         """
         Args:
             x: [N_total, hidden_dim]  (sparse, after R-GCN encoding).
             edge_index: [2, E_total].
             batch: [N_total] graph-membership vector.
+            return_assignments: If True, also return soft assignment matrices
+                and the dense batch mask for XAI analysis.
 
-        Returns:
+        Returns (default):
             pool_0: [B, hidden_dim]  global mean pool of encoder output.
             pool_1: [B, hidden_dim]  global mean pool after DiffPool level 1.
             pool_2: [B, hidden_dim]  global mean pool after DiffPool level 2.
             aux_loss: scalar  (link-prediction + entropy, summed over levels).
+
+        Returns (return_assignments=True), additionally:
+            s1: [B, N_max, k1]  soft assignment matrix, Level 1.
+            s2: [B, k1, k2]     soft assignment matrix, Level 2.
+            mask: [B, N_max]    bool padding mask (True = real node).
         """
         # Sparse → dense
         x_dense, mask = to_dense_batch(x, batch)   # [B, N_max, F]
@@ -89,6 +97,9 @@ class HierarchicalDiffPool(nn.Module):
         pool_2 = x2.mean(dim=1)                     # [B, F]
 
         aux_loss = link1 + ent1 + link2 + ent2
+
+        if return_assignments:
+            return pool_0, pool_1, pool_2, aux_loss, s1, s2, mask
         return pool_0, pool_1, pool_2, aux_loss
 
 

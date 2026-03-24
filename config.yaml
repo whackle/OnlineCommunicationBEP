@@ -67,3 +67,20 @@ evaluation:
   bootstrap_n: 1000
   stability_subsamples: 10
   stability_ratio: 0.8
+
+explain:
+  n_representatives_per_cluster: 20  # cascades sampled for augmentation sensitivity + viz
+  run_probes: true
+  run_diffpool_analysis: true
+  run_augmentation_sensitivity: true
+  run_cluster_profiles: true
+  run_representative_viz: true        # cascade tree plots per archetype (requires networkx)
+  probe_properties:
+    - cascade_depth
+    - cascade_breadth
+    - wiener_index
+    - follower_edge_ratio
+    - cascade_size
+    - event_window
+  figures_dpi: 300
+  probe_bootstrap_n: 200              # bootstrap iterations for probe CIs (probes are cheap)

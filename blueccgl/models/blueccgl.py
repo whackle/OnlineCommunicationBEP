@@ -127,3 +127,48 @@ class BlueCCGL(nn.Module):
         """Inference-only: return embeddings without projection or aux loss."""
         embedding, _, _ = self.forward(batch)
         return embedding
+
+    def explain(self, batch) -> tuple:
+        """XAI inference pass.
+
+        Returns node embeddings, soft DiffPool assignment matrices, and the
+        dense-batch padding mask alongside the cascade embedding.  Intended
+        for single-cascade (batch_size=1) calls to avoid padding interference
+        when interpreting assignment indices.
+
+        Args:
+            batch: PyG Batch (typically a single graph).
+
+        Returns:
+            embedding:  [B, embedding_dim]
+            h:          [N_total, hidden_dim]  node embeddings after encoder.
+            s1:         [B, N_max, k1] soft assignment Level-1, or None.
+            s2:         [B, k1, k2]   soft assignment Level-2, or None.
+            mask:       [B, N_max] bool padding mask, or None.
+        """
+        x = batch.x
+        if not self.use_sentiment:
+            x = x.clone()
+            x[:, 1] = 0.0
+            x[:, 2] = 0.0
+
+        h = self.encoder(x, batch.edge_index, batch.edge_type)
+
+        if self.use_diffpool:
+            pool_0, pool_1, pool_2, _, s1, s2, mask = self.pooler(
+                h, batch.edge_index, batch.batch, return_assignments=True,
+            )
+            pools = [pool_0, pool_1, pool_2]
+        else:
+            from torch_geometric.nn import global_mean_pool
+            pool_0 = global_mean_pool(h, batch.batch)
+            pools = [pool_0]
+            s1, s2, mask = None, None, None
+
+        if self.use_sentiment:
+            B = pool_0.shape[0]
+            sent = batch.sentiment_composition.view(B, 3)
+            pools.append(sent)
+
+        embedding = self.readout(pools)
+        return embedding, h, s1, s2, mask
