@@ -49,3 +49,29 @@ def vicreg_variance_loss(
         std = z.std(dim=0)  # [D]
         loss = loss + F.relu(target_std - std).mean()
     return loss / 2
+
+
+def vicreg_covariance_loss(
+    z_i: torch.Tensor,
+    z_j: torch.Tensor,
+) -> torch.Tensor:
+    """VICReg-style covariance regularisation (Bardes et al., 2022).
+
+    Penalises off-diagonal elements of the covariance matrix, forcing
+    embedding dimensions to be decorrelated and preventing dimensional
+    collapse where multiple dims encode the same direction.
+
+    Args:
+        z_i, z_j: [B, D] embedding batches from two views.
+
+    Returns:
+        Scalar covariance loss (lower = dimensions are decorrelated).
+    """
+    loss = torch.tensor(0.0, device=z_i.device)
+    for z in (z_i, z_j):
+        z_c = z - z.mean(dim=0)
+        N, D = z_c.shape
+        cov = (z_c.T @ z_c) / (N - 1)           # [D, D]
+        off_diag = cov.pow(2).sum() - cov.diagonal().pow(2).sum()
+        loss = loss + off_diag / D
+    return loss / 2

@@ -42,13 +42,29 @@ class ReadoutMLP(nn.Module):
 class ProjectorMLP(nn.Module):
     """Projector head for contrastive loss (discarded after pre-training).
 
-    Maps embedding_dim → hidden → embedding_dim.
+    Configurable depth, width, and BatchNorm (VICReg / Barlow Twins best
+    practice).  Deeper projectors absorb collapse, preserving information
+    in the pre-projector embedding used for downstream clustering.
     """
 
-    def __init__(self, embedding_dim: int = 64, hidden_dim: int = 128):
+    def __init__(
+        self,
+        embedding_dim: int = 64,
+        hidden_dim: int = 128,
+        n_layers: int = 2,
+        use_bn: bool = False,
+    ):
         super().__init__()
-        self.fc1 = nn.Linear(embedding_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, embedding_dim)
+        layers: list[nn.Module] = []
+        in_dim = embedding_dim
+        for i in range(n_layers - 1):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            if use_bn:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            in_dim = hidden_dim
+        layers.append(nn.Linear(in_dim, embedding_dim))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.fc2(F.relu(self.fc1(z)))
+        return self.net(z)

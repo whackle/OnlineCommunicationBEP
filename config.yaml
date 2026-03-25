@@ -28,7 +28,10 @@ model:
   embedding_dim: 64
   pool: diffpool                      # options: diffpool | mean (ablation A3)
   pool_ratios: [0.5, 0.25]
-  diffpool_aux_weight: 0.01           # was 0.5 — reduced 50× to prevent entropy regularisation from dominating InfoNCE
+  diffpool_aux_weight: 0.1            # sweet spot: enough encoder regularisation without dominating InfoNCE (v2=0.5 killed pool_2, v3=0.01 starved encoder)
+  projector_hidden_dim: 256           # wider projector — more capacity to absorb collapse (was 128)
+  projector_layers: 3                 # deeper projector — VICReg/SimCLR v2 best practice (was 2)
+  projector_bn: true                  # BatchNorm in projector — stabilises training, prevents projector-level collapse
   diffpool_max_nodes: 1000            # cap for DiffPool memory; larger cascades use SAGPool
   use_sentiment: true                 # set false for ablation A4
 
@@ -42,17 +45,18 @@ augmentation:
   hard_negatives: true
 
 training:
-  epochs: 50
+  epochs: 75                         # extended from 50 — richer 4-term loss landscape needs more convergence time
   batch_size: 64
   lr: 1.0e-3
   lr_schedule: cosine                 # options: cosine | constant
   lr_min: 1.0e-5
   warmup_epochs: 5
   temperature: 0.3                    # InfoNCE tau; raised from 0.1 — harder contrastive task, prevents pretext saturation
-  grad_clip_norm: 1.0
+  grad_clip_norm: 2.0                # relaxed from 1.0 — v2/v3 clipped every step; covariance term needs room to act
   checkpoint_every: 10               # epochs between checkpoints
   log_grad_norm_every: 50            # batches between gradient norm logs
-  variance_weight: 0.25              # raised from 0.1 — stronger VICReg push to distribute embeddings on hypersphere
+  variance_weight: 0.25              # VICReg variance term — ensures per-dim spread
+  covariance_weight: 0.04            # NEW: VICReg covariance term — decorrelates dimensions, fixes dimensional collapse
   early_stopping_patience: 15        # epochs without improvement before stopping
   early_stopping_min_delta: 0.0001   # minimum loss decrease to count as improvement
 

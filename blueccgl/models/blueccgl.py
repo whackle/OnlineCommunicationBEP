@@ -73,7 +73,9 @@ class BlueCCGL(nn.Module):
         )
         self.projector = ProjectorMLP(
             embedding_dim=embedding_dim,
-            hidden_dim=hidden_dim,
+            hidden_dim=mcfg.get("projector_hidden_dim", hidden_dim),
+            n_layers=mcfg.get("projector_layers", 2),
+            use_bn=mcfg.get("projector_bn", False),
         )
 
     # ------------------------------------------------------------------

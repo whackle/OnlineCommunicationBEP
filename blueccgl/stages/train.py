@@ -25,7 +25,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from blueccgl.models.blueccgl import BlueCCGL
-from blueccgl.models.losses import info_nce_loss, vicreg_variance_loss
+from blueccgl.models.losses import info_nce_loss, vicreg_covariance_loss, vicreg_variance_loss
 
 
 def run(
@@ -82,6 +82,7 @@ def run(
     grad_clip = tcfg.get("grad_clip_norm", 1.0)
     aux_weight = cfg["model"].get("diffpool_aux_weight", 0.1)
     variance_weight = tcfg.get("variance_weight", 0.0)
+    covariance_weight = tcfg.get("covariance_weight", 0.0)
     ckpt_every = tcfg.get("checkpoint_every", 10)
     log_grad_every = tcfg.get("log_grad_norm_every", 50)
 
@@ -121,6 +122,7 @@ def run(
         epoch_contrast = 0.0
         epoch_aux = 0.0
         epoch_var = 0.0
+        epoch_cov = 0.0
         n_batches = 0
         grad_norms: list[float] = []
 
@@ -146,7 +148,8 @@ def run(
             contrastive = info_nce_loss(proj1, proj2, temperature)
             aux = aux_weight * (aux1 + aux2) / 2
             var_loss = variance_weight * vicreg_variance_loss(proj1, proj2) if variance_weight > 0 else torch.tensor(0.0, device=dev)
-            loss = contrastive + aux + var_loss
+            cov_loss = covariance_weight * vicreg_covariance_loss(proj1, proj2) if covariance_weight > 0 else torch.tensor(0.0, device=dev)
+            loss = contrastive + aux + var_loss + cov_loss
 
             # Backward
             optimizer.zero_grad()
@@ -158,6 +161,7 @@ def run(
             epoch_contrast += contrastive.item()
             epoch_aux += aux.item()
             epoch_var += var_loss.item() if isinstance(var_loss, torch.Tensor) else var_loss
+            epoch_cov += cov_loss.item() if isinstance(cov_loss, torch.Tensor) else cov_loss
             n_batches += 1
 
             if batch_idx % log_grad_every == 0:
@@ -178,6 +182,7 @@ def run(
         avg_contrast = epoch_contrast / max(n_batches, 1)
         avg_aux = epoch_aux / max(n_batches, 1)
         avg_var = epoch_var / max(n_batches, 1)
+        avg_cov = epoch_cov / max(n_batches, 1)
         current_lr = optimizer.param_groups[0]["lr"]
 
         epoch_log = {
@@ -186,6 +191,7 @@ def run(
             "contrastive": round(avg_contrast, 5),
             "aux": round(avg_aux, 5),
             "variance": round(avg_var, 5),
+            "covariance": round(avg_cov, 5),
             "lr": current_lr,
             "grad_norm_mean": round(sum(grad_norms) / max(len(grad_norms), 1), 4),
             "time_s": round(time.time() - t_start, 1),

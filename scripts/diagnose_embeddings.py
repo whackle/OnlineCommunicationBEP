@@ -86,6 +86,9 @@ def main():
     model.eval()
     print(f"[diag] Model loaded (epoch {ckpt.get('epoch', '?')}, loss {ckpt.get('loss', '?'):.5f})")
 
+    # ── 1.5. Training log analysis ────────────────────────────────────────
+    train_log = _load_training_log(ROOT / "outputs" / "train" / "training_log.json")
+
     # ── 2. Extract embeddings + pool-level representations ────────────────
     print("[diag] Extracting embeddings...")
     embeddings, event_windows, pools = _extract_all(model, data_list)
@@ -115,6 +118,7 @@ def main():
         "checkpoint_loss": ckpt.get("loss"),
         "n_cascades": N,
         "embedding_dim": emb_dim,
+        "training_log": train_log,
         "collapse": collapse,
         "discriminative": discriminative,
         "pool_levels": pool_diag,
@@ -124,7 +128,7 @@ def main():
     }
     (out_dir / "embedding_diagnostics.json").write_text(json.dumps(report, indent=2, default=float))
 
-    _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, recommendations)
+    _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, recommendations, emb_dim, train_log)
 
     elapsed = time.time() - t0
     print(f"\n[diag] Done in {elapsed:.1f}s. Outputs in {out_dir}")
@@ -173,6 +177,62 @@ def _extract_all(
         pools["pool_2"] = torch.cat(all_pool2, dim=0)
 
     return embeddings, event_windows, pools
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1.5. Training log analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _load_training_log(log_path: Path) -> dict:
+    """Load and summarise training_log.json. Returns empty dict if not found."""
+    if not log_path.exists():
+        return {"available": False}
+
+    with open(log_path) as f:
+        log = json.load(f)
+
+    if not log:
+        return {"available": False}
+
+    first = log[0]
+    last = log[-1]
+    best = min(log, key=lambda e: e["loss"])
+    has_covariance = "covariance" in first
+
+    summary: dict = {
+        "available": True,
+        "n_epochs": len(log),
+        "initial_loss": first["loss"],
+        "final_loss": last["loss"],
+        "best_loss": best["loss"],
+        "best_epoch": best["epoch"],
+        "final_contrastive": last.get("contrastive"),
+        "final_aux": last.get("aux"),
+        "final_variance": last.get("variance"),
+        "final_grad_norm": last.get("grad_norm_mean"),
+        "has_covariance_term": has_covariance,
+    }
+
+    if has_covariance:
+        cov_vals = [e["covariance"] for e in log if "covariance" in e]
+        summary["initial_covariance"] = cov_vals[0] if cov_vals else None
+        summary["final_covariance"] = cov_vals[-1] if cov_vals else None
+        # Check convergence: is final cov < 10% of initial?
+        if cov_vals and cov_vals[0] > 0:
+            summary["covariance_reduction_pct"] = round(
+                100 * (1 - cov_vals[-1] / cov_vals[0]), 1
+            )
+        else:
+            summary["covariance_reduction_pct"] = None
+
+    # Gradient norm trend (is clipping still happening constantly?)
+    grad_norms = [e.get("grad_norm_mean", 0) for e in log]
+    grad_clip = 2.0  # v4 default; approximate
+    epochs_clipping = sum(1 for g in grad_norms if g > grad_clip)
+    summary["grad_clip_fraction"] = round(epochs_clipping / len(grad_norms), 2)
+    summary["final_grad_norm"] = grad_norms[-1]
+
+    return summary
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -467,10 +527,13 @@ def _verdict(
 
     if eff_rank < 10:
         reasons.append(f"FAIL: effective rank = {eff_rank:.1f} (<10 = severe dimensional collapse)")
-        recommendations.append("Add VICReg-style variance/covariance regularization or use larger projector head")
+        recommendations.append(
+            "Increase covariance_weight (try 0.1) or switch to pool:mean — "
+            "if covariance_weight is already set, DiffPool may be incompatible with this contrastive setup"
+        )
     elif eff_rank < 20:
         reasons.append(f"WARN: effective rank = {eff_rank:.1f} (10-20 = partial dimensional collapse)")
-        recommendations.append("Consider increasing embedding_dim or adding variance regularization")
+        recommendations.append("Increase covariance_weight or train for more epochs to allow decorrelation to converge")
     else:
         reasons.append(f"OK: effective rank = {eff_rank:.1f} (>20)")
 
@@ -497,7 +560,21 @@ def _verdict(
         if isinstance(pinfo, dict) and "median_cosine_sim" in pinfo:
             if pinfo["median_cosine_sim"] > 0.9:
                 reasons.append(f"WARN: {pname} median cosine = {pinfo['median_cosine_sim']:.3f} (>0.9 = pool collapsed)")
-                recommendations.append(f"Reduce diffpool_aux_weight or simplify to single-level pooling ({pname})")
+                if pname == "pool_2":
+                    recommendations.append("Increase diffpool_aux_weight (try 0.2) — pool_2 is collapsing, encoder needs more auxiliary signal")
+                else:
+                    recommendations.append(f"Reduce diffpool_aux_weight — {pname} is over-regularised")
+        # Extra check: pool_0 eff_dim should be high (it's the encoder output before DiffPool)
+        if pname == "pool_0" and isinstance(pinfo, dict):
+            ed = pinfo.get("effective_dim", 0)
+            if ed < 10:
+                reasons.append(f"FAIL: pool_0 eff_dim = {ed:.1f} (<10 = encoder representations collapsed)")
+                recommendations.append(
+                    "pool_0 (raw encoder output) is collapsed — increase diffpool_aux_weight to restore "
+                    "node-level diversity signal to the encoder"
+                )
+            elif ed < 20:
+                reasons.append(f"WARN: pool_0 eff_dim = {ed:.1f} (10-20 = encoder partially collapsed)")
 
     # -- Overall verdict --
     has_fail = any(r.startswith("FAIL") for r in reasons)
@@ -520,12 +597,36 @@ def _verdict(
 # 7. Summary printer
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, recommendations):
+def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, recommendations,
+                   emb_dim: int = 64, train_log: dict | None = None):
     def _status(val, ok_thresh, warn_thresh, lower_is_better=True):
         if lower_is_better:
             return "OK" if val < ok_thresh else ("WARN" if val < warn_thresh else "FAIL")
         else:
             return "OK" if val > ok_thresh else ("WARN" if val > warn_thresh else "FAIL")
+
+    # ── Training log summary (if available) ──────────────────────────────
+    if train_log and train_log.get("available"):
+        print("\n" + "=" * 60)
+        print("  TRAINING LOG")
+        print("=" * 60)
+        print(f"  Epochs trained  : {train_log['n_epochs']}")
+        print(f"  Loss            : {train_log['initial_loss']:.4f} → {train_log['final_loss']:.4f}  (best={train_log['best_loss']:.4f} @ epoch {train_log['best_epoch']})")
+        print(f"  Contrastive     : {train_log.get('final_contrastive', 'n/a')}")
+        print(f"  Aux (DiffPool)  : {train_log.get('final_aux', 'n/a')}")
+        print(f"  Variance        : {train_log.get('final_variance', 'n/a')}")
+        if train_log.get("has_covariance_term"):
+            cov_init = train_log.get("initial_covariance", "n/a")
+            cov_final = train_log.get("final_covariance", "n/a")
+            cov_pct = train_log.get("covariance_reduction_pct")
+            cov_status = "OK" if (cov_pct is not None and cov_pct > 30) else "WARN"
+            print(f"  Covariance      : {cov_init} → {cov_final}  ({cov_pct}% reduction)  [{cov_status}]")
+        else:
+            print("  Covariance      : NOT PRESENT (pre-v4 checkpoint)")
+        gn = train_log.get("final_grad_norm", 0)
+        gclip_frac = train_log.get("grad_clip_fraction", 0)
+        gn_status = "OK" if gclip_frac < 0.3 else "WARN"
+        print(f"  Grad norm (final): {gn:.3f}  (clipped {gclip_frac*100:.0f}% of epochs)  [{gn_status}]")
 
     print("\n" + "=" * 60)
     print("  EMBEDDING DIAGNOSTICS")
@@ -543,7 +644,7 @@ def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, reco
     print(f"{'Effective rank (SVD)':<32} {er:>10.1f}   {_status(er, 20, 10, lower_is_better=False)}")
 
     cd = collapse["collapsed_dims"]
-    print(f"{'Collapsed dims (<0.01 var)':<32} {cd:>7d}/64   {'OK' if cd < 10 else 'WARN'}")
+    print(f"{'Collapsed dims (<0.01 var)':<32} {cd:>4d}/{emb_dim}   {'OK' if cd < 10 else 'WARN'}")
 
     t1 = collapse["top1_variance_ratio"]
     print(f"{'Top-1 variance ratio':<32} {t1:>10.4f}   {'WARN' if t1 > 0.5 else 'OK'}")
@@ -570,7 +671,9 @@ def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, reco
                 pi = pool_diag[pname]
                 ed = pi["effective_dim"]
                 mc = pi["median_cosine_sim"]
-                print(f"{pname + ' eff_dim':<32} {ed:>10.1f}   {'WARN' if ed < 5 else 'OK'}")
+                # pool_0 is the raw encoder output — should be high diversity
+                ed_thresh = 20 if pname == "pool_0" else 5
+                print(f"{pname + ' eff_dim':<32} {ed:>10.1f}   {'FAIL' if ed < ed_thresh // 2 else ('WARN' if ed < ed_thresh else 'OK')}")
                 print(f"{pname + ' median_cos':<32} {mc:>10.4f}   {'WARN' if mc > 0.9 else 'OK'}")
 
     print("=" * 60)
