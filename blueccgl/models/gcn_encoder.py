@@ -7,7 +7,7 @@ from torch_geometric.nn import GCNConv
 
 
 class GCNEncoder(nn.Module):
-    """Same architecture as RGCNEncoder but ignores edge types."""
+    """Same architecture as RGCNEncoder (with residual connections) but ignores edge types."""
 
     def __init__(
         self,
@@ -31,8 +31,12 @@ class GCNEncoder(nn.Module):
     ) -> torch.Tensor:
         """edge_type is accepted but ignored (API compatibility with R-GCN)."""
         for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
+            h = conv(x, edge_index)
+            if i > 0:                    # skip connection: dims match for layers 1+ (hidden→hidden)
+                h = h + x
             if i < len(self.convs) - 1:
-                x = F.relu(x)
+                x = F.relu(h)
                 x = F.dropout(x, p=self.dropout, training=self.training)
+            else:
+                x = h                    # final layer: no activation
         return x

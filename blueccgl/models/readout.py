@@ -6,10 +6,10 @@ import torch.nn.functional as F
 
 
 class ReadoutMLP(nn.Module):
-    """Two-layer MLP: concat(pool_levels, sentiment) → embedding.
+    """Two-layer MLP: concat(pool_levels, root, sentiment) → embedding.
 
-    Input dimension is computed at construction time based on pooling mode
-    and whether sentiment enrichment is enabled.
+    Input dimension is computed at construction time based on pooling mode,
+    whether root-node readout is enabled, and whether sentiment is enabled.
     """
 
     def __init__(
@@ -18,11 +18,13 @@ class ReadoutMLP(nn.Module):
         embedding_dim: int = 64,
         use_diffpool: bool = True,
         use_sentiment: bool = True,
+        use_root: bool = False,
     ):
         super().__init__()
         n_pools = 3 if use_diffpool else 1
+        root_dim = hidden_dim if use_root else 0
         sentiment_dim = 3 if use_sentiment else 0
-        in_dim = n_pools * hidden_dim + sentiment_dim
+        in_dim = n_pools * hidden_dim + root_dim + sentiment_dim
 
         self.fc1 = nn.Linear(in_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, embedding_dim)

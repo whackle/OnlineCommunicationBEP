@@ -147,6 +147,7 @@ def _extract_all(
 
     all_emb, all_events = [], []
     all_pool0, all_pool1, all_pool2 = [], [], []
+    all_root = []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="extracting", unit="batch"):
@@ -155,18 +156,25 @@ def _extract_all(
             all_emb.append(emb.cpu())
             all_events.append(batch.event_window.cpu())
 
-            # -- Pool-level capture (replicate encoder+pooler path) --
+            # -- Encoder node embeddings (needed for pool-level and root capture) --
+            x = batch.x
+            if not model.use_sentiment:
+                x = x.clone()
+                x[:, 1] = 0.0
+                x[:, 2] = 0.0
+            h = model.encoder(x, batch.edge_index, batch.edge_type)
+
+            # -- Pool-level capture (DiffPool mode) --
             if model.use_diffpool:
-                x = batch.x
-                if not model.use_sentiment:
-                    x = x.clone()
-                    x[:, 1] = 0.0
-                    x[:, 2] = 0.0
-                h = model.encoder(x, batch.edge_index, batch.edge_type)
                 p0, p1, p2, _ = model.pooler(h, batch.edge_index, batch.batch)
                 all_pool0.append(p0.cpu())
                 all_pool1.append(p1.cpu())
                 all_pool2.append(p2.cpu())
+
+            # -- Root node capture (node 0 of each graph in batch) --
+            if model.use_root_readout:
+                root_h = h[batch.ptr[:-1]]    # [B, hidden_dim]
+                all_root.append(root_h.cpu())
 
     embeddings = torch.cat(all_emb, dim=0)
     event_windows = torch.cat(all_events, dim=0)
@@ -175,6 +183,8 @@ def _extract_all(
         pools["pool_0"] = torch.cat(all_pool0, dim=0)
         pools["pool_1"] = torch.cat(all_pool1, dim=0)
         pools["pool_2"] = torch.cat(all_pool2, dim=0)
+    if all_root:
+        pools["root_node"] = torch.cat(all_root, dim=0)
 
     return embeddings, event_windows, pools
 
@@ -231,6 +241,12 @@ def _load_training_log(log_path: Path) -> dict:
     epochs_clipping = sum(1 for g in grad_norms if g > grad_clip)
     summary["grad_clip_fraction"] = round(epochs_clipping / len(grad_norms), 2)
     summary["final_grad_norm"] = grad_norms[-1]
+
+    # Augmentation fallback rate (v6+)
+    has_fallback = "aug_fallback_rate" in first
+    summary["has_fallback_rate"] = has_fallback
+    if has_fallback:
+        summary["final_fallback_rate"] = last.get("aug_fallback_rate", 0)
 
     return summary
 
@@ -469,7 +485,7 @@ def _compute_alignment(model: BlueCCGL, data_list: list, cfg: dict) -> float:
 
 def _pool_diagnostics(pools: dict[str, torch.Tensor], out_dir: Path) -> dict:
     if not pools:
-        return {"note": "DiffPool disabled — no pool-level diagnostics"}
+        return {"note": "DiffPool disabled and root readout not enabled — no pool-level diagnostics"}
 
     results = {}
 
@@ -575,6 +591,13 @@ def _verdict(
                 )
             elif ed < 20:
                 reasons.append(f"WARN: pool_0 eff_dim = {ed:.1f} (10-20 = encoder partially collapsed)")
+        # Root node readout: high eff_dim means root is adding topology-sensitive signal
+        if pname == "root_node" and isinstance(pinfo, dict):
+            ed = pinfo.get("effective_dim", 0)
+            if ed < 10:
+                reasons.append(f"WARN: root_node eff_dim = {ed:.1f} (<10 = root representations collapsed; residuals may not be sufficient)")
+            elif ed >= 20:
+                reasons.append(f"OK: root_node eff_dim = {ed:.1f} (>=20 = root readout adding structural diversity)")
 
     # -- Overall verdict --
     has_fail = any(r.startswith("FAIL") for r in reasons)
@@ -627,6 +650,10 @@ def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, reco
         gclip_frac = train_log.get("grad_clip_fraction", 0)
         gn_status = "OK" if gclip_frac < 0.3 else "WARN"
         print(f"  Grad norm (final): {gn:.3f}  (clipped {gclip_frac*100:.0f}% of epochs)  [{gn_status}]")
+        if train_log.get("has_fallback_rate"):
+            fb = train_log.get("final_fallback_rate", 0)
+            fb_status = "OK" if fb < 0.05 else ("WARN" if fb < 0.20 else "FAIL")
+            print(f"  Aug fallback rate: {fb:.3f}  [{fb_status}]")
 
     print("\n" + "=" * 60)
     print("  EMBEDDING DIAGNOSTICS")
@@ -664,7 +691,8 @@ def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, reco
     for ev, info in sorted(discriminative["intra_event_sim"].items()):
         print(f"{'  intra ' + ev:<32} {info['mean']:>10.4f}   (n={info['n_cascades']})")
 
-    if isinstance(pool_diag, dict) and "pool_0" in pool_diag:
+    has_pool_info = isinstance(pool_diag, dict) and any(k in pool_diag for k in ("pool_0", "root_node"))
+    if has_pool_info:
         print("-" * 60)
         for pname in ["pool_0", "pool_1", "pool_2"]:
             if pname in pool_diag:
@@ -675,6 +703,12 @@ def _print_summary(collapse, discriminative, pool_diag, verdict, reasoning, reco
                 ed_thresh = 20 if pname == "pool_0" else 5
                 print(f"{pname + ' eff_dim':<32} {ed:>10.1f}   {'FAIL' if ed < ed_thresh // 2 else ('WARN' if ed < ed_thresh else 'OK')}")
                 print(f"{pname + ' median_cos':<32} {mc:>10.4f}   {'WARN' if mc > 0.9 else 'OK'}")
+        if "root_node" in pool_diag:
+            pi = pool_diag["root_node"]
+            ed = pi["effective_dim"]
+            mc = pi["median_cosine_sim"]
+            print(f"{'root_node eff_dim':<32} {ed:>10.1f}   {'FAIL' if ed < 10 else ('WARN' if ed < 20 else 'OK')}")
+            print(f"{'root_node median_cos':<32} {mc:>10.4f}   {'WARN' if mc > 0.9 else 'OK'}")
 
     print("=" * 60)
     vcolor = {"HEALTHY": "\033[92m", "MARGINAL": "\033[93m", "COLLAPSED": "\033[91m"}

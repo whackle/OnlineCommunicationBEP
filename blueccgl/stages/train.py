@@ -124,6 +124,8 @@ def run(
         epoch_var = 0.0
         epoch_cov = 0.0
         n_batches = 0
+        epoch_fallbacks = 0
+        epoch_cascades = 0
         grad_norms: list[float] = []
 
         pbar = tqdm(loader, desc=f"epoch {epoch:>3}/{epochs}", unit="batch", leave=False)
@@ -132,9 +134,11 @@ def run(
             originals = batch.to_data_list()
             view1_list, view2_list = [], []
             for d in originals:
-                v1, v2 = augment_pair(d)
+                v1, v2, fell_back = augment_pair(d)
                 view1_list.append(v1)
                 view2_list.append(v2)
+                epoch_fallbacks += int(fell_back)
+                epoch_cascades += 1
 
             from torch_geometric.data import Batch
             b1 = Batch.from_data_list(view1_list).to(dev)
@@ -185,6 +189,7 @@ def run(
         avg_cov = epoch_cov / max(n_batches, 1)
         current_lr = optimizer.param_groups[0]["lr"]
 
+        aug_fallback_rate = epoch_fallbacks / max(epoch_cascades, 1)
         epoch_log = {
             "epoch": epoch,
             "loss": round(avg_loss, 5),
@@ -192,6 +197,7 @@ def run(
             "aux": round(avg_aux, 5),
             "variance": round(avg_var, 5),
             "covariance": round(avg_cov, 5),
+            "aug_fallback_rate": round(aug_fallback_rate, 4),
             "lr": current_lr,
             "grad_norm_mean": round(sum(grad_norms) / max(len(grad_norms), 1), 4),
             "time_s": round(time.time() - t_start, 1),
@@ -203,6 +209,7 @@ def run(
             print(
                 f"  epoch {epoch:>3}/{epochs}  loss={avg_loss:.4f}  "
                 f"contrast={avg_contrast:.4f}  aux={avg_aux:.4f}  "
+                f"aug_fb={aug_fallback_rate:.3f}  "
                 f"lr={current_lr:.2e}  grad={epoch_log['grad_norm_mean']:.3f}"
             )
 
@@ -283,13 +290,16 @@ def _build_augmentor(acfg: dict):
     def pair(data):
         """Apply two different random strategies + feature masking; fall back to original."""
         s1, s2 = random.sample(range(len(strategies)), k=min(2, len(strategies)))
-        v1 = strategies[s1](data) or data
-        v2 = strategies[s2](data) or data
+        v1_raw = strategies[s1](data)
+        v2_raw = strategies[s2](data)
+        fell_back = (v1_raw is None) or (v2_raw is None)
+        v1 = v1_raw if v1_raw is not None else data
+        v2 = v2_raw if v2_raw is not None else data
         # Apply independent feature masking to each view
         if feat_mask_ratio > 0:
             v1 = mask_features(v1, mask_ratio=feat_mask_ratio, feature_dim=feat_dim)
             v2 = mask_features(v2, mask_ratio=feat_mask_ratio, feature_dim=feat_dim)
-        return v1, v2
+        return v1, v2, fell_back
 
     return pair
 

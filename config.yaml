@@ -21,12 +21,13 @@ cascade:
 model:
   encoder: rgcn                       # options: rgcn | gcn (ablation A1)
   rgcn_bases: 2
-  rgcn_layers: 3
+  rgcn_layers: 2                      # v6: was 3 — 3-hop over-smooths small cascades (min_size=10); 2 layers + residuals preferred
   rgcn_dropout: 0.3
   input_dim: 6                        # temporal + sent_label + sent_score + depth + in_deg + out_deg
   hidden_dim: 128
   embedding_dim: 64
   pool: mean                          # v5: diffpool disabled — pool_2 collapsed in all 4 runs (structural: k2=250 supernodes >> actual cascade sizes)
+  use_root_readout: true              # v6: NEW — root node (cascade origin) as topology-sensitive readout alongside mean pool
   pool_ratios: [0.5, 0.25]
   diffpool_aux_weight: 0.1            # sweet spot: enough encoder regularisation without dominating InfoNCE (v2=0.5 killed pool_2, v3=0.01 starved encoder)
   projector_hidden_dim: 256           # wider projector — more capacity to absorb collapse (was 128)

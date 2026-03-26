@@ -1,4 +1,4 @@
-"""R-GCN encoder with basis decomposition for edge-type-aware message passing."""
+"""R-GCN encoder with basis decomposition and residual connections."""
 
 import torch
 import torch.nn as nn
@@ -7,10 +7,14 @@ from torch_geometric.nn import RGCNConv
 
 
 class RGCNEncoder(nn.Module):
-    """3-layer R-GCN: input_dim → hidden_dim (×num_layers).
+    """N-layer R-GCN with residual connections (layers 1+).
 
     Uses basis decomposition to share parameters across relation types
     while still allowing per-type weight differentiation.
+
+    Residual connections are applied from layer 1 onward (layer 0 changes
+    dims from input_dim → hidden_dim so no skip there). This prevents
+    over-smoothing on small graphs where 3 hops covers the entire graph.
     """
 
     def __init__(
@@ -49,8 +53,12 @@ class RGCNEncoder(nn.Module):
             [N, hidden_dim] node embeddings.
         """
         for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index, edge_type)
+            h = conv(x, edge_index, edge_type)
+            if i > 0:                    # skip connection: dims match for layers 1+ (hidden→hidden)
+                h = h + x
             if i < len(self.convs) - 1:
-                x = F.relu(x)
+                x = F.relu(h)
                 x = F.dropout(x, p=self.dropout, training=self.training)
+            else:
+                x = h                    # final layer: no activation (ReadoutMLP handles it)
         return x

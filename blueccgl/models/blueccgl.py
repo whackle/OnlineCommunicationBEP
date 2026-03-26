@@ -37,6 +37,7 @@ class BlueCCGL(nn.Module):
         embedding_dim = mcfg.get("embedding_dim", 64)
         self.use_sentiment = mcfg.get("use_sentiment", True)
         self.use_diffpool = mcfg.get("pool", "diffpool") == "diffpool"
+        self.use_root_readout = mcfg.get("use_root_readout", False)
 
         # ── Encoder ──────────────────────────────────────────────────────
         if mcfg.get("encoder", "rgcn") == "rgcn":
@@ -70,6 +71,7 @@ class BlueCCGL(nn.Module):
             embedding_dim=embedding_dim,
             use_diffpool=self.use_diffpool,
             use_sentiment=self.use_sentiment,
+            use_root=self.use_root_readout,
         )
         self.projector = ProjectorMLP(
             embedding_dim=embedding_dim,
@@ -113,6 +115,13 @@ class BlueCCGL(nn.Module):
             pool_0 = global_mean_pool(h, batch.batch)
             pools = [pool_0]
             aux_loss = torch.tensor(0.0, device=h.device)
+
+        # Root node readout: node 0 of each graph is always the cascade root
+        # (guaranteed by pyg_dataset.py uid_to_idx construction).
+        # batch.ptr[:-1] gives the start index of each graph in the node list.
+        if self.use_root_readout:
+            root_h = h[batch.ptr[:-1]]    # [B, hidden_dim]
+            pools.append(root_h)
 
         # Sentiment composition
         if self.use_sentiment:
@@ -166,6 +175,10 @@ class BlueCCGL(nn.Module):
             pool_0 = global_mean_pool(h, batch.batch)
             pools = [pool_0]
             s1, s2, mask = None, None, None
+
+        if self.use_root_readout:
+            root_h = h[batch.ptr[:-1]]    # [B, hidden_dim]
+            pools.append(root_h)
 
         if self.use_sentiment:
             B = pool_0.shape[0]
