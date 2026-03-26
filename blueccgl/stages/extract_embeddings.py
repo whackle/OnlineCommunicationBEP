@@ -19,6 +19,8 @@ import pandas as pd
 import torch
 from torch_geometric.loader import DataLoader
 
+import yaml
+
 from blueccgl.models.blueccgl import BlueCCGL
 
 
@@ -43,7 +45,18 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
         )
     print(f"[extract_embeddings] Loading model from {ckpt_path}")
     ckpt = torch.load(ckpt_path, weights_only=False, map_location=dev)
-    model = BlueCCGL(cfg).to(dev)
+
+    # Use the config snapshot from training so the architecture always matches
+    # the checkpoint — safe even when config.yaml has been updated for a new run.
+    snapshot_path = output_dir / "train" / "config_snapshot.yaml"
+    if snapshot_path.exists():
+        with open(snapshot_path) as f:
+            train_cfg = yaml.safe_load(f)
+        print(f"[extract_embeddings] Using training config snapshot (pool={train_cfg['model'].get('pool')})")
+    else:
+        train_cfg = cfg
+
+    model = BlueCCGL(train_cfg).to(dev)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     epoch = ckpt.get("epoch", "?")
