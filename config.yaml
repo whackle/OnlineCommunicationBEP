@@ -27,7 +27,7 @@ model:
   hidden_dim: 128
   embedding_dim: 64
   pool: mean                          # v5: diffpool disabled — pool_2 collapsed in all 4 runs (structural: k2=250 supernodes >> actual cascade sizes)
-  use_root_readout: true              # v6: NEW — root node (cascade origin) as topology-sensitive readout alongside mean pool
+  use_root_readout: false             # v7: disabled — root has 3 constant features (temporal=0, depth=0, in_deg=0) → eff_dim=1.1 in v6, diluting readout MLP
   pool_ratios: [0.5, 0.25]
   diffpool_aux_weight: 0.1            # sweet spot: enough encoder regularisation without dominating InfoNCE (v2=0.5 killed pool_2, v3=0.01 starved encoder)
   projector_hidden_dim: 256           # wider projector — more capacity to absorb collapse (was 128)
@@ -39,25 +39,25 @@ model:
 augmentation:
   strategy: feed_aware                # options: feed_aware | random (ablation A2)
   follower_retain_ratio: 0.3          # v6: was 0.5 — views too similar; need genuinely destructive perturbation
-  temporal_prefix_ratio: 0.2          # v6: was 0.4 — only show 20% of cascade prefix per view (forces structural learning)
+  temporal_prefix_ratio: 0.3          # v7: was 0.2 — 12.8% fallback rate in v6; 0.3 reduces fallbacks while still creating distinct views
   bridge_remove_ratio: 0.7            # v6: was 0.5 — aggressively remove non-follower entry nodes
   feature_mask_ratio: 0.4             # v6: was 0.25 — mask 40% of node features to prevent trivial feature matching
   min_nodes_after_aug: 1              # lowered in v5 — stops fallback-to-original for small cascades
   hard_negatives: true
 
 training:
-  epochs: 75                         # extended from 50 — richer 4-term loss landscape needs more convergence time
+  epochs: 50                        # v7: was 75 — best epoch was 74/75 in v6, model still improving at cutoff; early_stopping_patience=15 will stop early if it plateaus
   batch_size: 64
   lr: 1.0e-3
   lr_schedule: cosine                 # options: cosine | constant
   lr_min: 1.0e-5
   warmup_epochs: 5
   temperature: 0.1                    # v6: lowered from 0.3 — harder contrastive task forces the model to distinguish cascades; alignment=0.999 means task is too easy
-  grad_clip_norm: 2.0                # relaxed from 1.0 — v2/v3 clipped every step; covariance term needs room to act
+  grad_clip_norm: 5.0                # v7: was 2.0 — clipped 100% of epochs in v6 (mean norm=3.744); 5.0 allows model to actually learn
   checkpoint_every: 10               # epochs between checkpoints
   log_grad_norm_every: 50            # batches between gradient norm logs
   variance_weight: 0.1               # reduced from 0.25 — covariance handles decorrelation now
-  covariance_weight: 1.0              # v6: was 0.1 — covariance raw value ~0.017 × 0.1 = 0.0017 contribution vs InfoNCE ~1-2; needs to be 10× stronger
+  covariance_weight: 0.25             # v7: was 1.0 — 86.9% covariance reduction achieved in v6; weight=1.0 caused grad norm=3.744 (clipped every epoch); 0.25 maintains pressure without dominating
   early_stopping_patience: 15        # epochs without improvement before stopping
   early_stopping_min_delta: 0.0001   # minimum loss decrease to count as improvement
 
