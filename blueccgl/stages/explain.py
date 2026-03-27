@@ -37,6 +37,19 @@ import json
 import warnings
 from pathlib import Path
 
+
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalar types."""
+    def default(self, obj):
+        import numpy as np
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -168,7 +181,7 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
 
     # ── Write consolidated report (checkpoint) ────────────────────────────
     report_path = out_dir / "explanation_report.json"
-    report_path.write_text(json.dumps(report, indent=2))
+    report_path.write_text(json.dumps(report, indent=2, cls=_NumpyEncoder))
     print(f"\n[explain] Explanation report → {report_path}")
 
 
@@ -297,7 +310,7 @@ def _run_probes(
 
     # Save probe results
     probe_path = out_dir / "probe_results.json"
-    probe_path.write_text(json.dumps(results, indent=2))
+    probe_path.write_text(json.dumps(results, indent=2, cls=_NumpyEncoder))
 
     # Heatmap figure
     _plot_probe_heatmap(results, cluster_ids, fig_dir)
@@ -650,7 +663,7 @@ def _run_cluster_profiles(
         "archetype_event_crosstab": cross_tab,
         "pca_discriminative": pca_result,
     }
-    (out_dir / "cluster_profiles.json").write_text(json.dumps(profiles, indent=2))
+    (out_dir / "cluster_profiles.json").write_text(json.dumps(profiles, indent=2, cls=_NumpyEncoder))
 
     # ── Figures ───────────────────────────────────────────────────────────
     _plot_radar_profiles(per_cluster, structural_props, cluster_ids, fig_dir)
@@ -917,7 +930,7 @@ def _run_augmentation_sensitivity(
             print(f"[explain/aug_sensitivity]   C{k}: {aug_summary}")
 
     aug_path = fig_dir.parent / "augmentation_sensitivity.json"
-    aug_path.write_text(json.dumps(results, indent=2))
+    aug_path.write_text(json.dumps(results, indent=2, cls=_NumpyEncoder))
 
     _plot_aug_sensitivity(results, cluster_ids, list(aug_fns.keys()), fig_dir)
 
