@@ -79,7 +79,7 @@ explain:
   run_diffpool_analysis: true
   run_augmentation_sensitivity: true
   run_cluster_profiles: true
-  run_representative_viz: true        # cascade tree plots per archetype (requires networkx)
+  run_representative_viz: false       # disabled for now — color array bug in _draw_cascade_tree
   probe_properties:
     - cascade_depth
     - cascade_breadth
