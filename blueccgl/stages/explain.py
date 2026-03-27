@@ -220,7 +220,7 @@ def _run_probes(
         # Global score
         if is_cat:
             y_int = y.astype(int)
-            clf = LogisticRegression(max_iter=500, random_state=42, n_jobs=-1)
+            clf = LogisticRegression(max_iter=2000, random_state=42, n_jobs=-1)
             try:
                 global_score = float(
                     np.mean(
@@ -247,7 +247,7 @@ def _run_probes(
             idx = rng.choice(len(emb_scaled), size=len(emb_scaled), replace=True)
             try:
                 if is_cat:
-                    clf_b = LogisticRegression(max_iter=200, random_state=0, n_jobs=-1)
+                    clf_b = LogisticRegression(max_iter=2000, random_state=0, n_jobs=-1)
                     cv_b = cross_val_score(clf_b, emb_scaled[idx], y_int[idx], cv=3, scoring="balanced_accuracy")
                 else:
                     reg_b = Ridge(alpha=1.0)
@@ -275,7 +275,7 @@ def _run_probes(
                     if len(set(y_k.astype(int))) < 2:
                         per_cluster[str(k)] = float("nan")
                         continue
-                    clf_k = LogisticRegression(max_iter=200, random_state=42, n_jobs=-1)
+                    clf_k = LogisticRegression(max_iter=2000, random_state=42, n_jobs=-1)
                     skf = StratifiedKFold(n_splits=n_splits)
                     scores_k = cross_val_score(clf_k, emb_k, y_k.astype(int), cv=skf, scoring="balanced_accuracy")
                 else:

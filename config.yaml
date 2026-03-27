@@ -42,7 +42,7 @@ augmentation:
   temporal_prefix_ratio: 0.3          # v7: was 0.2 — 12.8% fallback rate in v6; 0.3 reduces fallbacks while still creating distinct views
   bridge_remove_ratio: 0.7            # v6: was 0.5 — aggressively remove non-follower entry nodes
   feature_mask_ratio: 0.4             # v6: was 0.25 — mask 40% of node features to prevent trivial feature matching
-  min_nodes_after_aug: 1              # lowered in v5 — stops fallback-to-original for small cascades
+  min_nodes_after_aug: 5              # v7: raised from 1 — single-node cascades produce zero-norm embeddings → NaN alignment + norm instability
   hard_negatives: true
 
 training:
