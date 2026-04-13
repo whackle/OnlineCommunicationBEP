@@ -9,9 +9,28 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy as _copy
 import json
 import sys
 from pathlib import Path
+
+# Monkey-patch for Python 3.14 + matplotlib deepcopy infinite recursion bug.
+# matplotlib.path.Path.__deepcopy__ calls copy.deepcopy(super(), memo) which
+# recurses infinitely in Python 3.14. Patch before any matplotlib import.
+import matplotlib.path as _mpl_path
+
+def _patched_path_deepcopy(self, memo):
+    cls = self.__class__
+    result = cls.__new__(cls)
+    memo[id(self)] = result
+    for k, v in self.__dict__.items():
+        try:
+            setattr(result, k, _copy.deepcopy(v, memo))
+        except Exception:
+            setattr(result, k, v)
+    return result
+
+_mpl_path.Path.__deepcopy__ = _patched_path_deepcopy
 
 import matplotlib
 matplotlib.use("Agg")
@@ -53,45 +72,52 @@ def main():
 
     # ── Panel 1: Total loss ──────────────────────────────────────────────
     ax = axes[0]
-    ax.plot(epochs, total, color="steelblue", lw=2, label="Total loss")
-    ax.axvline(best_epoch, color="red", ls="--", alpha=0.6, label=f"Best epoch {best_epoch}")
+    ax.plot(epochs, total, color="steelblue", lw=2)
+    ax.axvline(best_epoch, color="red", ls="--", alpha=0.6)
+    ax.text(best_epoch + 0.5, ax.get_ylim()[0], f"best={best_epoch}", color="red", fontsize=8, va="bottom")
     ax.annotate(f"best={best_loss:.4f}", xy=(best_epoch, best_loss),
                 xytext=(best_epoch + 2, best_loss + 0.05),
                 fontsize=8, color="red")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.set_title("Total Loss")
-    ax.legend(fontsize=8)
+    ax.text(epochs[-1], total[-1], " Total loss", color="steelblue", fontsize=8, va="center")
     ax.xaxis.set_major_locator(ticker.MultipleLocator(10))
     ax.grid(alpha=0.3)
 
     # ── Panel 2: Loss components ─────────────────────────────────────────
     ax = axes[1]
-    ax.plot(epochs, contrast,  lw=1.8, label="Contrastive (InfoNCE)", color="steelblue")
-    ax.plot(epochs, variance,  lw=1.5, label="Variance (VICReg)", color="darkorange", ls="--")
+    ax.plot(epochs, contrast,  lw=1.8, color="steelblue")
+    ax.plot(epochs, variance,  lw=1.5, color="darkorange", ls="--")
     if has_cov:
-        ax.plot(epochs, covariance, lw=1.5, label="Covariance (VICReg)", color="green", ls="-.")
-    ax.plot(epochs, aux,       lw=1.2, label="Aux (DiffPool)", color="grey", ls=":")
+        ax.plot(epochs, covariance, lw=1.5, color="green", ls="-.")
+    ax.plot(epochs, aux,       lw=1.2, color="grey", ls=":")
+    # Inline labels at end of each line
+    ax.text(epochs[-1], contrast[-1],   " Contrastive", color="steelblue",  fontsize=7, va="center")
+    ax.text(epochs[-1], variance[-1],   " Variance",    color="darkorange", fontsize=7, va="center")
+    if has_cov:
+        ax.text(epochs[-1], covariance[-1], " Covariance",  color="green",      fontsize=7, va="center")
+    ax.text(epochs[-1], aux[-1],        " Aux",         color="grey",       fontsize=7, va="center")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.set_title("Loss Components")
-    ax.legend(fontsize=8)
     ax.xaxis.set_major_locator(ticker.MultipleLocator(10))
     ax.grid(alpha=0.3)
 
     # ── Panel 3: Gradient norms ──────────────────────────────────────────
+    clip_val = 5.0  # v7 clip norm
     ax = axes[2]
-    ax.plot(epochs, grad_norms, color="purple", lw=1.5, label="Grad norm (mean)")
-    clip_val = 2.0  # v4 clip norm
-    ax.axhline(clip_val, color="red", ls="--", alpha=0.6, label=f"Clip threshold ({clip_val})")
+    ax.plot(epochs, grad_norms, color="purple", lw=1.5)
+    ax.axhline(clip_val, color="red", ls="--", alpha=0.6)
+    ax.text(epochs[-1], grad_norms[-1], " Grad norm", color="purple", fontsize=7, va="center")
+    ax.text(epochs[0],  clip_val + 0.05, f"clip={clip_val}", color="red", fontsize=7)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("L2 Gradient Norm")
     ax.set_title("Gradient Norms")
-    ax.legend(fontsize=8)
     ax.xaxis.set_major_locator(ticker.MultipleLocator(10))
     ax.grid(alpha=0.3)
 
-    plt.tight_layout()
+    plt.subplots_adjust(left=0.07, right=0.93, wspace=0.35, top=0.9)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")

@@ -46,7 +46,7 @@ augmentation:
   hard_negatives: true
 
 training:
-  epochs: 50                        # v7: was 75 — best epoch was 74/75 in v6, model still improving at cutoff; early_stopping_patience=15 will stop early if it plateaus
+  epochs: 150                        # v7: was 75 — best epoch was 74/75 in v6, model still improving at cutoff; early_stopping_patience=15 will stop early if it plateaus
   batch_size: 64
   lr: 1.0e-3
   lr_schedule: cosine                 # options: cosine | constant
@@ -62,8 +62,9 @@ training:
   early_stopping_min_delta: 0.0001   # minimum loss decrease to count as improvement
 
 clustering:
-  min_cluster_size_grid: [50, 100, 200]
-  min_samples: null                   # null = same as min_cluster_size
+  min_cluster_size_grid: [15, 25, 40]  # was [50, 100, 200] — smaller mcs absorbs more points into clusters, reduces noise
+  min_samples_ratio: 0.4               # min_samples = round(ratio * mcs); 0.3–0.6 range; lower than mcs = more inclusive core-point detection
+  noise_threshold: 0.30                # reject grid configs producing >noise_threshold noise (was hardcoded)
   umap_n_components: 2
   umap_n_neighbors: 15
   umap_min_dist: 0.1

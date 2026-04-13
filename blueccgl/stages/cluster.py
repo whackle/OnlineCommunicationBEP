@@ -37,9 +37,9 @@ def run(cfg: dict, output_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ccfg = cfg.get("clustering", {})
-    grid: list[int] = ccfg.get("min_cluster_size_grid", [50, 100, 200])
-    min_samples = ccfg.get("min_samples", None)  # None → same as min_cluster_size
-    noise_threshold = 0.30  # reject grid configs producing >30% noise
+    grid: list[int] = ccfg.get("min_cluster_size_grid", [15, 25, 40])
+    min_samples_ratio: float = ccfg.get("min_samples_ratio", 0.4)  # min_samples = round(ratio * mcs)
+    noise_threshold: float = ccfg.get("noise_threshold", 0.30)
 
     # ── 1. Load embeddings ────────────────────────────────────────────────
     emb_path = output_dir / "extract_embeddings" / "embeddings.h5"
@@ -56,13 +56,18 @@ def run(cfg: dict, output_dir: Path) -> None:
     grid_results: list[dict] = []
     best_score = -np.inf
     best_labels: np.ndarray | None = None
+    best_clusterer: hdbscan_lib.HDBSCAN | None = None
     best_mcs: int = grid[0]
 
     for mcs in grid:
-        print(f"[cluster]   min_cluster_size={mcs} ...", end=" ", flush=True)
+        min_samples_computed = max(1, round(min_samples_ratio * mcs))
+        print(
+            f"[cluster]   min_cluster_size={mcs}  min_samples={min_samples_computed} ...",
+            end=" ", flush=True,
+        )
         clusterer = hdbscan_lib.HDBSCAN(
             min_cluster_size=mcs,
-            min_samples=min_samples,
+            min_samples=min_samples_computed,
             core_dist_n_jobs=-1,
             prediction_data=True,
         )
@@ -89,6 +94,7 @@ def run(cfg: dict, output_dir: Path) -> None:
 
         result = {
             "min_cluster_size": mcs,
+            "min_samples": min_samples_computed,
             "n_clusters": n_clusters,
             "noise_count": noise_count,
             "noise_fraction": float(noise_frac),
@@ -103,19 +109,21 @@ def run(cfg: dict, output_dir: Path) -> None:
         if score > best_score:
             best_score = score
             best_labels = labels
+            best_clusterer = clusterer
             best_mcs = mcs
 
     # Fall back to smallest mcs if all configs were degenerate
     if best_labels is None or best_score < 0:
         print(
-            f"[cluster] WARNING: all grid configs produced >30% noise or <2 clusters. "
+            f"[cluster] WARNING: all grid configs produced >{noise_threshold:.0%} noise or <2 clusters. "
             f"Falling back to mcs={grid[0]} without noise filtering."
         )
         best_mcs = grid[0]
-        clusterer = hdbscan_lib.HDBSCAN(
-            min_cluster_size=best_mcs, min_samples=min_samples
+        best_clusterer = hdbscan_lib.HDBSCAN(
+            min_cluster_size=best_mcs,
+            min_samples=max(1, round(min_samples_ratio * best_mcs)),
         )
-        best_labels = clusterer.fit_predict(embeddings)
+        best_labels = best_clusterer.fit_predict(embeddings)
         for r in grid_results:
             if r["min_cluster_size"] == best_mcs:
                 r["selected"] = True
@@ -131,7 +139,21 @@ def run(cfg: dict, output_dir: Path) -> None:
         f"{n_final} clusters, {noise_final:.2%} noise"
     )
 
-    # ── 3. Save outputs ───────────────────────────────────────────────────
+    # ── 3. Save cluster persistence (stability) ────────────────────────────
+    assert best_clusterer is not None
+    persistence_data = {
+        "mean_persistence": float(np.mean(best_clusterer.cluster_persistence_)),
+        "per_cluster": best_clusterer.cluster_persistence_.tolist(),
+        "n_clusters": n_final,
+        "min_cluster_size_used": best_mcs,
+    }
+    persistence_path = out_dir / "cluster_persistences.json"
+    persistence_path.write_text(json.dumps(persistence_data, indent=2))
+    print(
+        f"[cluster] Cluster persistence (stability) — mean={persistence_data['mean_persistence']:.4f} → {persistence_path}"
+    )
+
+    # ── 4. Save outputs ───────────────────────────────────────────────────
     grid_path = out_dir / "grid_search_results.json"
     grid_path.write_text(json.dumps(grid_results, indent=2))
     print(f"[cluster] Grid search results → {grid_path}")

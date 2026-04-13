@@ -70,6 +70,13 @@ def run(cfg: dict, output_dir: Path) -> None:
         f"{n_noise:,} noise ({n_noise / len(labels):.2%})"
     )
 
+    # Load cluster persistence (stability) saved by cluster stage
+    persistence_path = output_dir / "cluster" / "cluster_persistences.json"
+    mean_persistence: float | None = None
+    if persistence_path.exists():
+        pdata = json.loads(persistence_path.read_text())
+        mean_persistence = pdata.get("mean_persistence")
+
     # ── 3. Bootstrap metric helper ────────────────────────────────────────
     sample_n = min(_BOOTSTRAP_SAMPLE, n_clean)
     rng = np.random.default_rng(42)
@@ -121,6 +128,7 @@ def run(cfg: dict, output_dir: Path) -> None:
         "n_clusters": n_clusters,
         "noise_count": n_noise,
         "noise_fraction": float(n_noise / len(labels)),
+        "mean_cluster_persistence": mean_persistence,
         "min_cluster_size_used": (
             int(df["min_cluster_size_used"].iloc[0])
             if "min_cluster_size_used" in df.columns
@@ -129,7 +137,25 @@ def run(cfg: dict, output_dir: Path) -> None:
         "bootstrap_sample_size": sample_n,
     }
 
-    # Print summary
+    # ── Central metrics block ─────────────────────────────────────────────
+    _SEP = "─" * 55
+    print(f"\n{_SEP}")
+    print("  CENTRAL METRICS")
+    print(_SEP)
+    print(f"  Number of clusters    : {n_clusters}")
+    print(f"  Noise fraction        : {n_noise / len(labels):.2%}  ({n_noise:,} / {len(labels):,})")
+    if mean_persistence is not None:
+        print(f"  Cluster stability     : {mean_persistence:.4f}  (mean HDBSCAN persistence)")
+    else:
+        print("  Cluster stability     : n/a  (cluster_persistences.json not found)")
+    dbcv_val = metrics.get("dbcv") or {}
+    if isinstance(dbcv_val, dict) and dbcv_val.get("mean") is not None:
+        print(f"  DBCV                  : {dbcv_val['mean']:.4f}  (density-based cluster validity)")
+    else:
+        print("  DBCV                  : n/a")
+    print(f"{_SEP}\n")
+
+    # ── Full bootstrapped metrics ─────────────────────────────────────────
     for name, v in metrics.items():
         if isinstance(v, dict) and v.get("mean") is not None:
             print(
