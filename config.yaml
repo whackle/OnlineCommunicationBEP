@@ -64,8 +64,9 @@ training:
 clustering:
   min_cluster_size_grid: [15, 25, 40]  # was [50, 100, 200] — smaller mcs absorbs more points into clusters, reduces noise
   min_samples_ratio: 0.4               # min_samples = round(ratio * mcs); 0.3–0.6 range; lower than mcs = more inclusive core-point detection
-  noise_threshold: 0.30                # reject grid configs producing >noise_threshold noise (was hardcoded)
-  umap_n_components: 2
+  noise_threshold: 0.70                # raised from 0.30 — raw embeddings in 64D routinely exceed 30%; allow silhouette to compare configs
+  umap_cluster_n_components: 10        # UMAP dims before HDBSCAN; 10D preserves structure while escaping curse of dimensionality
+  umap_n_components: 2                 # 2D used only for evaluate viz
   umap_n_neighbors: 15
   umap_min_dist: 0.1
 

@@ -28,6 +28,11 @@ try:
 except ImportError:
     raise ImportError("scikit-learn not installed: pip install scikit-learn")
 
+try:
+    import umap as umap_lib  # type: ignore
+except ImportError:
+    raise ImportError("umap-learn not installed: pip install umap-learn")
+
 # Maximum sample used for silhouette during grid search (keeps grid search fast)
 _SILHOUETTE_MAX_SAMPLE = 5_000
 
@@ -39,7 +44,10 @@ def run(cfg: dict, output_dir: Path) -> None:
     ccfg = cfg.get("clustering", {})
     grid: list[int] = ccfg.get("min_cluster_size_grid", [15, 25, 40])
     min_samples_ratio: float = ccfg.get("min_samples_ratio", 0.4)  # min_samples = round(ratio * mcs)
-    noise_threshold: float = ccfg.get("noise_threshold", 0.30)
+    noise_threshold: float = ccfg.get("noise_threshold", 0.70)
+    umap_n_components: int = ccfg.get("umap_cluster_n_components", 10)
+    umap_n_neighbors: int = ccfg.get("umap_n_neighbors", 15)
+    umap_min_dist: float = ccfg.get("umap_min_dist", 0.1)
 
     # ── 1. Load embeddings ────────────────────────────────────────────────
     emb_path = output_dir / "extract_embeddings" / "embeddings.h5"
@@ -52,7 +60,29 @@ def run(cfg: dict, output_dir: Path) -> None:
     meta_df = pd.read_parquet(idx_path)
     assert len(meta_df) == embeddings.shape[0], "Index/embedding count mismatch"
 
-    # ── 2. Grid search ────────────────────────────────────────────────────
+    # ── 2. UMAP reduction ─────────────────────────────────────────────────
+    print(
+        f"[cluster] UMAP reduction: {embeddings.shape[1]}D → {umap_n_components}D "
+        f"(n_neighbors={umap_n_neighbors}) ..."
+    )
+    reducer = umap_lib.UMAP(
+        n_components=umap_n_components,
+        n_neighbors=umap_n_neighbors,
+        min_dist=umap_min_dist,
+        random_state=42,
+        verbose=False,
+    )
+    emb_reduced: np.ndarray = reducer.fit_transform(embeddings)
+    print(f"[cluster] UMAP done → {emb_reduced.shape}")
+
+    # Save reduced embeddings so evaluate can reuse them for viz (avoids double UMAP)
+    umap_emb_path = out_dir / "umap_embeddings_cluster.h5"
+    with h5py.File(umap_emb_path, "w") as f:
+        f.create_dataset("embeddings", data=emb_reduced)
+        f.attrs["n_components"] = umap_n_components
+    print(f"[cluster] UMAP embeddings saved → {umap_emb_path}")
+
+    # ── 3. Grid search ────────────────────────────────────────────────────
     grid_results: list[dict] = []
     best_score = -np.inf
     best_labels: np.ndarray | None = None
@@ -71,7 +101,7 @@ def run(cfg: dict, output_dir: Path) -> None:
             core_dist_n_jobs=-1,
             prediction_data=True,
         )
-        labels: np.ndarray = clusterer.fit_predict(embeddings)
+        labels: np.ndarray = clusterer.fit_predict(emb_reduced)
 
         n_clusters = int(len(set(labels)) - (1 if -1 in labels else 0))
         noise_count = int((labels == -1).sum())
@@ -83,7 +113,7 @@ def run(cfg: dict, output_dir: Path) -> None:
             n_sample = min(_SILHOUETTE_MAX_SAMPLE, non_noise.sum())
             score = float(
                 silhouette_score(
-                    embeddings[non_noise],
+                    emb_reduced[non_noise],
                     labels[non_noise],
                     sample_size=n_sample,
                     random_state=42,
@@ -123,7 +153,7 @@ def run(cfg: dict, output_dir: Path) -> None:
             min_cluster_size=best_mcs,
             min_samples=max(1, round(min_samples_ratio * best_mcs)),
         )
-        best_labels = best_clusterer.fit_predict(embeddings)
+        best_labels = best_clusterer.fit_predict(emb_reduced)
         for r in grid_results:
             if r["min_cluster_size"] == best_mcs:
                 r["selected"] = True
