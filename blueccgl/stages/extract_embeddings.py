@@ -24,6 +24,62 @@ import yaml
 from blueccgl.models.blueccgl import BlueCCGL
 
 
+_DIAG_SAMPLE = 8_000  # cap for expensive pairwise ops
+
+
+def _embedding_diagnostics(embeddings: np.ndarray) -> None:
+    rng = np.random.default_rng(42)
+    N = len(embeddings)
+    idx = rng.choice(N, size=min(_DIAG_SAMPLE, N), replace=False)
+    emb = embeddings[idx].astype(np.float64)
+
+    # L2-normalise for cosine-based metrics
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    emb_n = emb / np.clip(norms, 1e-8, None)
+
+    # Effective rank (Roy & Vetterli 2007): exp(H) where H = entropy of normalised singular values
+    _, sv, _ = np.linalg.svd(emb_n, full_matrices=False)
+    sv_sq = sv ** 2
+    p = sv_sq / sv_sq.sum()
+    p = p[p > 0]
+    eff_rank = float(np.exp(-np.sum(p * np.log(p))))
+
+    # Uniformity (Wang & Isola 2020): mean pairwise Gaussian kernel on unit hypersphere
+    # log E[exp(-2 ||z_i - z_j||^2)] — lower (more negative) = more uniform
+    diff = emb_n[:, None, :] - emb_n[None, :, :]          # [S, S, D]
+    sq_dist = (diff ** 2).sum(-1)                           # [S, S]
+    mask = np.triu(np.ones((len(emb_n), len(emb_n)), dtype=bool), k=1)
+    uniformity = float(np.log(np.exp(-2 * sq_dist[mask]).mean()))
+
+    # Alignment: mean ||z_i - z_j||^2 for positive pairs
+    # Approximate with nearest-neighbour cosine sim as proxy (no pair labels here)
+    cos_sim = emb_n @ emb_n.T                               # [S, S]
+    np.fill_diagonal(cos_sim, -1.0)
+    median_cos = float(np.median(cos_sim.max(axis=1)))      # proxy: median NN sim
+
+    # Top-5 variance ratio
+    var_ratio = float(sv_sq[:5].sum() / sv_sq.sum())
+
+    _SEP = "─" * 57
+    print(f"\n{_SEP}")
+    print("  EMBEDDING DIAGNOSTICS")
+    print(_SEP)
+
+    def _fmt(val, lo, hi, invert=False):
+        ok = (lo <= val <= hi) if not invert else not (lo <= val <= hi)
+        return "OK" if ok else "WARN"
+
+    print(f"  Effective rank        : {eff_rank:.1f} / {embeddings.shape[1]}  "
+          f"[target >25]  {_fmt(eff_rank, 25, 1e9)}")
+    print(f"  Uniformity (log)      : {uniformity:.3f}  "
+          f"[target <-3.0]  {_fmt(uniformity, -1e9, -3.0)}")
+    print(f"  Median NN cosine sim  : {median_cos:.3f}  "
+          f"[proxy alignment — lower is better]")
+    print(f"  Top-5 variance ratio  : {var_ratio:.3f}  "
+          f"[target <0.6]  {_fmt(var_ratio, 0, 0.6)}")
+    print(_SEP + "\n")
+
+
 def run(cfg: dict, output_dir: Path, device: str) -> None:
     out_dir = output_dir / "extract_embeddings"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +169,9 @@ def run(cfg: dict, output_dir: Path, device: str) -> None:
             "[extract_embeddings] WARNING: near-zero norm variance — "
             "possible representation collapse. Check training loss."
         )
+
+    # ── 4b. Embedding quality diagnostics ────────────────────────────────
+    _embedding_diagnostics(embeddings)
 
     # ── 5. Save embeddings to HDF5 ────────────────────────────────────────
     emb_path = out_dir / "embeddings.h5"
