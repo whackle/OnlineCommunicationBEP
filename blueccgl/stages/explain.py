@@ -37,6 +37,8 @@ import json
 import warnings
 from pathlib import Path
 
+import blueccgl.utils.mpl_compat  # noqa: F401 — patches matplotlib Path.__deepcopy__ for Python 3.14
+
 
 class _NumpyEncoder(json.JSONEncoder):
     """JSON encoder that handles numpy scalar types."""
@@ -771,8 +773,8 @@ def _plot_archetype_event_heatmap(cross_tab: dict, cluster_ids: list[int], fig_d
         import seaborn as sns
 
         frac = cross_tab["fraction_per_event"]
-        # Reconstruct as DataFrame (rows = clusters, cols = events)
-        event_cols = sorted(frac[list(frac.keys())[0]].keys())
+        # frac: {event_window: {cluster_id: fraction, ...}, ...}
+        event_cols = sorted(frac.keys())
         mat = pd.DataFrame(
             {ev: [frac[ev].get(k, 0.0) for k in cluster_ids] for ev in event_cols},
             index=[f"C{k}" for k in cluster_ids],

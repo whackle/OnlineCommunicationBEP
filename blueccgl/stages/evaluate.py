@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import blueccgl.utils.mpl_compat  # noqa: F401 — patches matplotlib Path.__deepcopy__ for Python 3.14
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -230,3 +232,5 @@ def run(cfg: dict, output_dir: Path) -> None:
 
     except ImportError as e:
         print(f"[evaluate] WARNING: UMAP/matplotlib unavailable ({e}). Skipping figure.")
+    except RecursionError:
+        print("[evaluate] WARNING: UMAP figure failed (matplotlib recursion bug on Python 3.14). Skipping figure.")
