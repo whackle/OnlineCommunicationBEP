@@ -1,6 +1,6 @@
 # BlueCCGL — Full Implementation Plan
 
-## Current State Assessment (Updated 2026-03-24)
+## Current State Assessment (Updated 2026-04-17)
 
 | Asset | Status |
 |-------|--------|
@@ -11,9 +11,8 @@
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. Stages `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, and `explain` fully implemented. `explain` stage added to `ALL_STAGES`, `STAGE_CHECKPOINTS`, `STAGE_DEPS`. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
-| **Training v1** | DONE — 50 epochs, τ=0.1, cosine LR. Loss 1.589→0.035. Diagnostics: MARGINAL — alignment=0.997 (augmentations too weak), eff_rank=14.9/64 (dimensional collapse), uniformity=-1.88. Archived as `outputs/train/run_v1_tau01/` |
-| **Training v2** | PENDING RETRAIN — stronger augmentations (retain 0.5/prefix 0.4/bridge 0.5), feature masking 25%, τ=0.3, VICReg variance reg (0.1), DiffPool aux weight 0.5. Target: alignment 0.6–0.85, eff_rank >25, uniformity <-3.0 |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
+| **Training v8** | DONE — 150 epochs on SSH VM (87.205.21.33), best epoch 147, loss 0.1292. Results in `Outputs_17_04/`. 11 clusters, 1.5% noise, mean HDBSCAN persistence=0.395. Known issue: 79.6% augmentation fallback rate → fixed in v9 config (see augmentation section) |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
 
 ### Progress Summary
@@ -23,8 +22,8 @@
 | Sprint 1: Scaffolding | DONE | All package structure, CLI, config, pipeline orchestrator, seed, gitignore |
 | Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
 | Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
-| Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented; training v1 complete (50 epochs) |
-| Sprint 5: Full Data Integration | IN PROGRESS | Training v2 retraining on VM. Stages `extract_embeddings`, `cluster`, `evaluate`, `explain` fully implemented (2026-03-24). Model surgery: `diffpool.py` `return_assignments` flag + `BlueCCGL.explain()` method added. Remaining: run downstream pipeline once v2 checkpoint arrives; implement `ablation`, `downstream`, `stability` stubs |
+| Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented |
+| Sprint 5: Full Data Integration | DONE (v8) | Training v8 complete (150 epochs, best epoch 147, loss 0.1292). All downstream stages run: extract_embeddings → cluster (UMAP 64D→10D + HDBSCAN, mcs=300, 11 clusters) → evaluate → explain. Results in `Outputs_17_04/`. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
 
 ---
 
@@ -83,6 +82,10 @@ OnlineCommunicationBEP/
 │   │   ├── cascade_builder.py   # Parent assignment + edge-type logic
 │   │   ├── pyg_dataset.py       # Custom PyG InMemoryDataset
 │   │   └── dataloader.py        # Heterogeneous-size cascade batching
+│   │
+│   ├── utils/                   # Shared utilities
+│   │   ├── __init__.py
+│   │   └── mpl_compat.py        # matplotlib Python 3.14 Path.__deepcopy__ patch
 │   │
 │   └── evaluation/              # Metrics and visualisation
 │       ├── __init__.py
@@ -566,7 +569,7 @@ Training loop:
 2. **Learning rate schedule:** Start with `lr=1e-3`, cosine annealing to `1e-5` over 100 epochs. If loss plateaus early, consider warm-up (linear warm-up for 5 epochs).
 3. **Gradient explosion from DiffPool:** DiffPool's dense operations can produce large gradients. Gradient clipping is essential. Monitor gradient norms — if consistently at the clip value, the effective learning rate is being capped.
 
-### Step 4.2 — Extract Embeddings Stage (`blueccgl/stages/extract_embeddings.py`) — DONE (2026-03-24)
+### Step 4.2 — Extract Embeddings Stage (`blueccgl/stages/extract_embeddings.py`) — DONE
 
 **Stage:** `--stage extract_embeddings`
 **Reads:** `{output_dir}/train/checkpoints/best.pt`, `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
@@ -574,33 +577,38 @@ Training loop:
 
 **Implementation:** Load `best.pt` via `BlueCCGL(cfg)` + `load_state_dict()`. Inference with `model.encode()`, `batch_size=32`, `torch.no_grad()`. Saves full cascade metadata (depth, breadth, wiener_index, follower_edge_ratio, sentiment_composition, event_window) to `cascade_index.parquet` alongside the HDF5 embedding matrix. Sanity-checks embedding norm variance; warns if `std(norms) < 0.01` (potential collapse).
 
+**Embedding diagnostics (added 2026-04-17):** `_embedding_diagnostics()` function computes effective rank (SVD entropy), uniformity (Wang & Isola 2020), median NN cosine similarity, and top-5 variance ratio on up to 8,000 sampled embeddings. Prints a `EMBEDDING DIAGNOSTICS` block with OK/WARN status against targets: `eff_rank > 25`, `uniformity < -3.0`, `top-5 var ratio < 0.6`.
+
 **Checkpoint validation:**
 - Embedding matrix shape: `[N_cascades, 64]` (gzip-compressed in HDF5).
 - `cascade_index.parquet` row count matches embedding count.
-- Embedding norm mean/std/min/max printed for quick sanity check.
+- Embedding diagnostics printed automatically after every extraction run.
 
-### Step 4.3 — Cluster Stage (`blueccgl/stages/cluster.py`) — DONE (2026-03-24)
+### Step 4.3 — Cluster Stage (`blueccgl/stages/cluster.py`) — DONE
 
 **Stage:** `--stage cluster`
 **Reads:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`
-**Writes:** `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/grid_search_results.json`
+**Writes:** `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/grid_search_results.json`, `{output_dir}/cluster/cluster_persistences.json`, `{output_dir}/cluster/umap_embeddings_cluster.h5`
 
-**Implementation:** Grid search over `min_cluster_size ∈ {50, 100, 200}` (configurable). Silhouette score on non-noise points (capped at 5000 samples) used to select best config. Configs producing >30% noise are treated as degenerate and scored -1.0 (not selected unless all configs are degenerate). Falls back to smallest `min_cluster_size` if all configs are degenerate. Saves `cascade_id → cluster_label` Parquet (noise = label -1, preserved). `grid_search_results.json` records all grid metrics + which config was selected.
+**Implementation:** UMAP pre-reduction (64D → `umap_cluster_n_components=10`) applied before HDBSCAN — essential for avoiding curse of dimensionality (without this, all grid configs produce >67% noise). Grid search over `min_cluster_size ∈ config.clustering.min_cluster_size_grid` (default `[100, 200, 300]`). Per-step `min_samples = max(1, round(min_samples_ratio × mcs))` computed from `min_samples_ratio` (default 0.4). Silhouette score on non-noise points (capped at 5000 samples) selects best config. `noise_threshold` (default 0.70 — raised from 0.30 to allow silhouette comparison across all configs) filters degenerate configs. Best clusterer cached to extract `cluster_persistence_` after grid search.
 
-**Potential issues:**
-1. **High noise fraction (>30%):** Indicates embeddings don't form well-separated clusters. Investigate: (a) embedding quality (collapse?), (b) augmentation quality, (c) cascade homogeneity (all cascades look similar).
-2. **Too few clusters (<3):** HDBSCAN may find only 1–2 clusters + noise. Lower `min_cluster_size`. If still few, try reducing `min_samples`.
-3. **Too many clusters (>20):** May indicate fragmentation. Increase `min_cluster_size`.
+**Additional outputs:**
+- `cluster_persistences.json`: `mean_persistence`, `per_cluster` array, `n_clusters`, `min_cluster_size_used` — consumed by evaluate stage for CENTRAL METRICS block.
+- `umap_embeddings_cluster.h5`: 10D UMAP-reduced embeddings saved for reproducibility.
 
-### Step 4.4 — Evaluate Stage (`blueccgl/stages/evaluate.py`) — DONE (2026-03-24)
+**v8 results:** mcs=300 selected, 11 clusters, 1.5% noise, silhouette=0.362.
+
+### Step 4.4 — Evaluate Stage (`blueccgl/stages/evaluate.py`) — DONE
 
 **Stage:** `--stage evaluate`
-**Reads:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`, `{output_dir}/cluster/cluster_assignments.parquet`
+**Reads:** `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/extract_embeddings/cascade_index.parquet`, `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/cluster_persistences.json`
 **Writes:** `{output_dir}/evaluate/metrics.json`, `{output_dir}/evaluate/umap_figure.png`, `{output_dir}/evaluate/umap_coords.parquet`
 
 **Implementation:** Bootstrap (n=1000, capped at 5000-sample Silhouette) for Silhouette, Davies-Bouldin, Calinski-Harabasz. DBCV via `hdbscan.validity_index` (capped at 100 bootstrap iterations due to cost). All metrics report mean ± std + 95% CI. UMAP figure has 2 panels: (A) coloured by cluster label, (B) coloured by event_window. `umap_coords.parquet` saves 2D coordinates alongside `cascade_id` for reuse in explain stage without re-running UMAP.
 
-### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`) — DONE (2026-03-24)
+**CENTRAL METRICS block (added 2026-04-17):** Printed before the bootstrapped metrics table: number of clusters, noise fraction (absolute count + percentage), mean HDBSCAN persistence from `cluster_persistences.json`, and DBCV mean. Also stores `mean_cluster_persistence` in `metrics["meta"]`. `import blueccgl.utils.mpl_compat` added at top for Python 3.14 matplotlib compatibility (see Known Bugs #7).
+
+### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`) — DONE
 
 **Stage:** `--stage explain`
 **Reads:**
@@ -680,7 +688,11 @@ Selects top-5 cascades per cluster (closest to centroid in embedding space). Ren
 - Yuan et al. (2022). "Explainability in GNNs: A Taxonomic Survey." *TPAMI.*
 - Magister et al. (2021). "GCExplainer: Concept-based Explanations for GNNs."
 
-#### Config (deployed in `config.yaml` — 2026-03-24)
+**Python 3.14 compatibility:** `import blueccgl.utils.mpl_compat` added at top. Removed `sys.setrecursionlimit` workaround (insufficient for complex figures). `RecursionError` guard added in UMAP figure block as belt-and-suspenders fallback.
+
+**Bug fix (2026-04-17):** `_plot_archetype_event_heatmap` KeyError — `event_cols` was incorrectly extracted from one level too deep in the `frac` dict, yielding cluster IDs instead of event-window keys. Fixed to `event_cols = sorted(frac.keys())`.
+
+#### Config (deployed in `config.yaml`)
 
 ```yaml
 explain:
@@ -689,7 +701,7 @@ explain:
   run_diffpool_analysis: true
   run_augmentation_sensitivity: true
   run_cluster_profiles: true
-  run_representative_viz: true          # cascade tree plots per archetype (requires networkx)
+  run_representative_viz: false         # disabled — color array bug in _draw_cascade_tree
   probe_properties:
     - cascade_depth
     - cascade_breadth
@@ -867,40 +879,32 @@ Since only the 100 sample `user_posts` JSONL files are available, here is the pr
 - Total wall time: ~2.8 hours on CPU
 - Checkpoints: `best.pt`, `last.pt`, `epoch_{10,20,...,100}.pt`, `config_snapshot.yaml`, `training_log.json`
 
-**Training v2 (2026-03-23, τ=0.1 → τ=0.3, retrained with stronger augmentations):**
-
-After diagnostics revealed the v1 model was MARGINAL (see below), the following config changes were applied:
-
-| Parameter | v1 | v2 | Rationale |
-|---|---|---|---|
-| `augmentation.follower_retain_ratio` | 0.7 | 0.5 | Stronger structural perturbation |
-| `augmentation.temporal_prefix_ratio` | 0.6 | 0.4 | Forces learning beyond temporal shortcuts |
-| `augmentation.bridge_remove_ratio` | 0.3 | 0.5 | Removes more non-follower entry nodes |
-| `augmentation.feature_mask_ratio` | 0.0 | 0.25 | **NEW** — randomly zeros 25% of node feature dims per view. Blocks feature-statistics shortcut |
-| `training.temperature` | 0.1 | 0.3 | Harder contrastive task — prevents pretext saturation |
-| `training.variance_weight` | 0.0 | 0.1 | **NEW** — VICReg variance regularisation. Penalises dims with std < 1.0 to prevent dimensional collapse |
-| `model.diffpool_aux_weight` | 0.1 | 0.5 | Keeps DiffPool assignment matrices non-degenerate |
-
-**New code added for v2:**
-- `blueccgl/augmentations/feature_masking.py` — random node feature dimension zeroing
-- `blueccgl/models/losses.py` — added `vicreg_variance_loss()` (Bardes et al., 2022)
-- `blueccgl/stages/train.py` — integrated feature masking into augmentor + variance loss into training loop + `variance` field in training log
-
-**Target metrics for v2:** alignment 0.6–0.85, effective rank >25, uniformity < -3.0
-
-**Embedding diagnostics (v1, 2026-03-23):**
+**Training v1 diagnostics (2026-03-23) — MARGINAL:**
 
 | Metric | Value | Status |
 |---|---|---|
-| Median cosine sim | 0.365 | OK (<0.5) |
+| Median cosine sim | 0.365 | OK |
 | Effective rank (SVD) | 14.9 / 64 | WARN — partial dimensional collapse |
-| Uniformity | -1.884 | WARN — moderate (should be <-3.0) |
-| Alignment | 0.997 | **CRITICAL** — augmentations too weak, model matches pairs trivially |
-| Top-5 variance ratio | 0.907 | 91% of variance in 5 dims |
-| Pool level 2 eff_dim | 3.65 / 128 | WARN — final DiffPool layer degenerate |
-| Intra vs inter-event gap | <0.06 | No event discrimination |
+| Uniformity | -1.884 | WARN |
+| Alignment | 0.997 | CRITICAL — augmentations too weak |
+| Top-5 variance ratio | 0.907 | WARN |
 
-**Verdict: MARGINAL → retrain required.** Root cause: augmentations don't destroy enough information; model solves pretext task via unchanged node feature statistics rather than learning structural cascade patterns.
+Root cause: augmentations too weak; model solves pretext task via unchanged node feature statistics. Required retrain.
+
+**Iterative config evolution (v2→v8):** Multiple training runs on SSH VMs with progressive hyperparameter tuning. Key changes each version tracked in `config.yaml` comments. Final v8 config (currently in `config.yaml`) includes:
+- `temperature=0.1` (lowered from v2's 0.3 — harder contrastive task)
+- `grad_clip_norm=5.0` (raised from 2.0 — was clipping 100% of epochs in v6)
+- `covariance_weight=0.25` (lowered from 1.0 — was dominating loss)
+- `rgcn_layers=2` (lowered from 3 — 3-hop over-smoothed small cascades)
+- `use_root_readout=false` (root has 3 constant features, dilutes readout)
+- `epochs=150` (raised from 75 — best epoch was 74/75 in v6, model still improving)
+- `projector_layers=3`, `projector_bn=true` (VICReg/SimCLR v2 best practice)
+
+**New code added v1→v8:**
+- `blueccgl/augmentations/feature_masking.py` — random node feature dimension zeroing
+- `blueccgl/models/losses.py` — `vicreg_variance_loss()` (Bardes et al., 2022) + covariance loss
+- `blueccgl/stages/train.py` — feature masking + variance/covariance losses integrated
+- `blueccgl/utils/mpl_compat.py` — matplotlib Python 3.14 compatibility patch
 
 ### Sprint 5: Full Data Integration + Downstream Pipeline
 
@@ -911,15 +915,35 @@ After diagnostics revealed the v1 model was MARGINAL (see below), the following 
 | 26 | Run `--stage cascade_construction` with full data | DONE | 39,983 cascades, ~3 min |
 | 27 | Run `--stage build_pyg_dataset` | DONE | cascade_dataset.pt (159.8 MB, 39,983 cascades). 2026-03-18 |
 | 28 | Run `--stage eda` | NOT STARTED | Stub — needs implementation. Unblocked |
-| 29 | Run `--stage train` v1 | DONE | 50 epochs, τ=0.1. Diagnostics: MARGINAL (alignment=0.997, eff_rank=14.9). 2026-03-23 |
-| 29b | **Retrain v2** | IN PROGRESS (VM) | Stronger augmentations, feature masking, τ=0.3, VICReg variance reg, aux weight 0.5. Config committed. Old run archived to `outputs/train/run_v1_tau01`. No code restart needed — model surgery changes (diffpool.py, blueccgl.py) are inference-only |
-| 30 | **Implement `--stage extract_embeddings`** | DONE (2026-03-24) | Full implementation. Saves `embeddings.h5` + `cascade_index.parquet`. Norm variance sanity check. Awaiting v2 checkpoint to run |
-| 31 | **Implement `--stage cluster`** | DONE (2026-03-24) | Full implementation. HDBSCAN grid search with Silhouette selection, degenerate-config rejection. Awaiting v2 checkpoint to run |
-| 32 | **Implement `--stage evaluate`** | DONE (2026-03-24) | Full implementation. Bootstrap CIs on 4 metrics, UMAP 2-panel figure, `umap_coords.parquet` saved for explain. Awaiting v2 checkpoint to run |
-| 33 | **Implement `--stage explain`** | DONE (2026-03-24) | Full implementation. 5 sub-steps: probing, DiffPool extraction, cluster profiles (+4 new RQ-aligned figures), augmentation sensitivity, representative cascade viz. Model surgery: `diffpool.py` return_assignments + `blueccgl.py` explain() added. `explain` added to pipeline dependency chain. `h5py`, `networkx` added to `install.sh`. Awaiting v2 checkpoint to run |
-| 34 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub — blocked on #32. Each variant: train → extract → cluster → evaluate |
-| 35 | **Implement + run `--stage downstream`** | NOT STARTED | Stub — blocked on #30. Size + longevity prediction heads |
-| 36 | **Implement + run `--stage stability`** | NOT STARTED | Stub — blocked on #31. 10× 80% subsample ARI |
+| 29 | **Training v8** (SSH VM 87.205.21.33) | DONE | 150 epochs, best epoch 147, loss 0.1292. Config: τ=0.1, feature masking, VICReg, covariance reg. Results in `Outputs_17_04/`. Note: 79.6% aug fallback rate flagged — fixed in v9 config below |
+| 30 | **Run `--stage extract_embeddings`** | DONE | embeddings.h5 + cascade_index.parquet. Embedding diagnostics block added. |
+| 31 | **Run `--stage cluster`** | DONE | UMAP 64D→10D + HDBSCAN. mcs=300 selected, 11 clusters, 1.5% noise, silhouette=0.362, mean persistence=0.395 |
+| 32 | **Run `--stage evaluate`** | DONE | CENTRAL METRICS block + bootstrap CIs + UMAP figure. DBCV computed. |
+| 33 | **Run `--stage explain`** | DONE | Probes, DiffPool assignments, cluster profiles (4 figures), augmentation sensitivity. Event heatmap KeyError fixed. matplotlib RecursionError fixed via mpl_compat.py |
+| 34 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub. Each variant: train → extract → cluster → evaluate |
+| 35 | **Implement + run `--stage downstream`** | NOT STARTED | Stub. Size + longevity prediction heads |
+| 36 | **Implement + run `--stage stability`** | NOT STARTED | Stub. 10× 80% subsample ARI |
+
+**v9 config changes (augmentation fallback fix, 2026-04-17):**
+Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, always below `min_nodes_after_aug=5` → 79.6% fallback to random augmentation.
+- `augmentation.follower_retain_ratio`: 0.3 → **0.4** (0.4×7=2.8, passes min=3)
+- `augmentation.temporal_prefix_ratio`: 0.3 → **0.5** (keep first half not first third)
+- `augmentation.min_nodes_after_aug`: 5 → **3** (5 caused fallback on median-7-node cascades)
+
+**Training v8 results summary:**
+
+| Metric | Value |
+|--------|-------|
+| Epochs | 150 (best: 147) |
+| Best loss | 0.1292 |
+| Clusters | 11 |
+| Noise fraction | 1.5% (579 / 39,404) |
+| Mean HDBSCAN persistence | 0.395 |
+| follower_edge_ratio R² | 0.941 (global), 0.917–0.981 per cluster |
+| cascade_depth R² | 0.686 (global), 0.697–0.824 per cluster |
+| cascade_breadth R² | 0.317 (global), 0.333–0.938 per cluster |
+| cascade_size R² | −6.07 (global — driven by clusters 3 and 6 outliers) |
+| event_window accuracy | 0.143 (chance = 1/7) — no event discrimination |
 
 ---
 
@@ -931,9 +955,9 @@ After diagnostics revealed the v1 model was MARGINAL (see below), the following 
 | **Disk space for full data** | — | — | — | RESOLVED — CPU-only torch + pip cache purge freed space. Streaming tar (no full extraction) keeps footprint manageable. ~15 GB free |
 | **Too few cascades with ≥10 reposts** | Medium | Weak clustering signal | Lower threshold to ≥5; report as limitation | RESOLVED — 39,983 cascades at ≥10 threshold. Ample for HDBSCAN with min_cluster_size=50–200 |
 | **DiffPool OOM on large cascades** | Medium | Training crashes | Cap cascade size at 1000 for DiffPool; fallback to SAGPool | MITIGATED — max_nodes=150 in DiffPool. P95 cascade size is 69 nodes, so cap is nearly lossless. Training stable so far |
-| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | DIAGNOSED — v1 shows partial dimensional collapse (eff_rank=14.9/64) and near-perfect alignment (0.997). Not full collapse but MARGINAL. v2 retrain addresses with feature masking, VICReg variance reg, τ=0.3, stronger augmentations |
+| **Representation collapse during training** | Medium | Useless embeddings | Monitor embedding variance; add projector MLP; tune temperature | RESOLVED — v8: follower_edge_ratio R²=0.941, cascade_depth R²=0.686. Embeddings carry strong structural signal. event_window accuracy still at chance (0.143) — acknowledged limitation |
 | **Follower graph temporal confound** | Certain | Biased FOLLOWER labels for early cascades | Acknowledge as limitation; sensitivity analysis | OPEN |
-| **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | Try multiple `min_cluster_size` values; consider UMAP pre-reduction | OPEN |
+| **High HDBSCAN noise fraction** | Medium | Weak archetype discovery | UMAP 64D→10D pre-reduction before HDBSCAN; noise_threshold=0.70 to allow silhouette comparison | RESOLVED — v8: 1.5% noise (was 67.6% without UMAP pre-reduction) |
 | **Cascade reconstruction heuristic too lossy** | Medium | Inaccurate cascade trees | Validate via known properties (e.g., branching factor distributions from literature) | OPEN |
 | **Keyword false positives (e.g., "hostage")** | Medium | Noisy cascade roots | Co-occurrence gate: "hostage/hostages" requires ≥1 other keyword to match | MITIGATED — gate implemented in keywords.py |
 | **Sample data insufficient for cascade testing** | High | Can't test cascade construction without followers data | Use degraded mode with `repost_from` field only; test full pipeline once data arrives | RESOLVED — full data downloaded, unit tests pass |
@@ -954,14 +978,19 @@ After diagnostics revealed the v1 model was MARGINAL (see below), the following 
 8. **Augmentation utilities in `__init__.py`:** Shared `subgraph()` and `root_component()` helpers live in `blueccgl/augmentations/__init__.py` rather than duplicating across strategies.
 9. **Two-pass sentiment lookup in `build_pyg_dataset`:** Primary lookup in `conflict_posts.parquet` (1.9M rows, fast); DuckDB fallback on `conflict_window_posts.parquet` (172M rows) for reposter nodes not in the NLP-filtered set.
 10. **Crash recovery in `train.py`:** `last.pt` checkpoint saved every epoch enables resume from interruption without loss of progress.
+11. **UMAP before HDBSCAN (2026-04-17):** Raw 64D embeddings cause curse of dimensionality — all HDBSCAN configs produced >67% noise. Added UMAP 64D→10D reduction in cluster.py before grid search. This is standard practice and dropped noise to 1.5%.
+12. **noise_threshold=0.70 (2026-04-17):** Raised from hardcoded 0.30 to 0.70 (configurable). With UMAP pre-reduction, all configs produce low noise; the threshold mainly prevents pathological fallback, not normal operation. 0.30 caused all configs to score -1.0 silhouette before UMAP was added.
+13. **mcs=[100,200,300] for 11 archetypes (2026-04-17):** Initial grid [15,25,40] produced 700+ clusters (too granular for thesis interpretation). [100,200,300] with mcs=300 selected → 11 meaningful archetypes — thesis-interpretable, matches prior cascade literature cluster counts.
+14. **matplotlib Python 3.14 fix via monkey-patch (2026-04-17):** `matplotlib/path.py:285` calls `copy.deepcopy(super(), memo)` which causes infinite recursion in Python 3.14's updated deepcopy implementation. `sys.setrecursionlimit` is insufficient (complex figures need >10,000 levels). Fix: `blueccgl/utils/mpl_compat.py` patches `Path.__deepcopy__` to copy `__dict__` directly, avoiding the `super()` call. Imported at the top of all affected stages.
+15. **min_nodes_after_aug=3, follower_retain_ratio=0.4 (v9 config, 2026-04-17):** Original v6/v7 config had `min_nodes=5` and `retain_ratio=0.3` — together these caused 79.6% of cascades to fall back to random augmentation (median cascade has 7 nodes; 0.3×7=2.1 < 5). Fixed to `min_nodes=3`, `retain_ratio=0.4`, `temporal_prefix_ratio=0.5`.
 
 ## Key Decisions Still Open
 
 1. **DiffPool vs. SAGPool:** DiffPool completed training successfully (max_nodes=150). No instability observed. Decision: keep DiffPool.
-2. **Embedding quality validation:** v1 diagnosed as MARGINAL (alignment=0.997, eff_rank=14.9). v2 retrain config committed. **Must re-run diagnostics after v2 retrain** and verify alignment < 0.85, eff_rank > 25, uniformity < -3.0 before proceeding to clustering.
-3. **HDBSCAN `min_cluster_size`:** Grid search over {50, 100, 200} planned. With 39,983 cascades and 69% baseline (27,572), event-specific cascades are smaller per event (930–3,338). May need min_cluster_size=50 to avoid overcollapsing.
-4. **Ablation training time budget:** Each A1–A5 variant requires a full training run (~2.8 hrs on CPU). All 5 = ~14 hrs. Consider reducing epochs for ablations (e.g., 50 epochs) if wall-clock is too tight.
-5. **Explain stage scope:** Core 4 sub-steps (probes, DiffPool assignments, cluster profiles, augmentation sensitivity) are planned. Optional extensions (GNNExplainer, PGExplainer, TCAV) depend on remaining time budget. TCAV has highest thesis novelty but requires concept set curation (~6h). Decision deferred until after clustering results are available.
+2. **Ablation training time budget:** Each A1–A5 variant requires a full training run on SSH VM. Consider reducing epochs to 75 for ablations to limit wall-clock time.
+3. **Explain stage optional extensions:** Core 4 sub-steps done. Optional extensions (GNNExplainer, PGExplainer, TCAV) depend on remaining time budget. TCAV has highest thesis novelty but requires concept set curation (~6h). Decision deferred.
+4. **event_window not captured in embeddings:** Probes show balanced accuracy = 0.143 (chance) — model does not discriminate between events. This limits SRQ1/SRQ2 answers. Options: (a) accept as limitation, (b) add event-aware contrastive loss, (c) use cluster × event cross-tabulation from cluster profiles instead.
+5. **Next training run (v9):** Augmentation fallback fix applied to config (v9 values). Decide whether to retrain on SSH VM before ablation stage.
 
 ---
 
@@ -973,3 +1002,5 @@ After diagnostics revealed the v1 model was MARGINAL (see below), the following 
 4. **`quick_look.py` — `langs_list or []` ValueError:** Numpy array `or` is ambiguous. Fixed with explicit None/length check.
 5. **`cascade_construction.py` — `_load_follower_graph` wrong path:** Only checked `Data/raw/followers.csv.gz`. Added fallback to `Data/followers.csv.gz`. Fixed 2025-03-17.
 6. **`follower_graph.py` — per-edge DuckDB queries O(n²):** Each `follows()` call issued a separate SQL query, making tree building take an estimated 26 hours. Fixed with `preload_for_users()`: one batch JOIN query loads all relevant edges into a Python `set` before tree building starts. Total runtime went from 26hr estimate to ~3 min. Fixed 2025-03-17.
+7. **matplotlib Python 3.14 RecursionError in all plot-generating stages:** `matplotlib/path.py` `Path.__deepcopy__` calls `copy.deepcopy(super(), memo)` which causes infinite recursion under Python 3.14's updated deepcopy. `sys.setrecursionlimit(10_000)` is insufficient — complex figures need >10,000 levels and hit the limit. Fixed with `blueccgl/utils/mpl_compat.py` monkey-patch that replaces `Path.__deepcopy__` with a direct `__dict__` copy that never calls `super()`. Imported at top of `evaluate.py` and `explain.py`. Fixed 2026-04-17.
+8. **`explain.py` — `_plot_archetype_event_heatmap` KeyError on cluster ID 7:** `event_cols = sorted(frac[list(frac.keys())[0]].keys())` dereferenced one level too deep — `frac` is `{event_window: {cluster_id: fraction}}`, so indexing one level in gave cluster IDs {0..10}, not event windows {0..6}. Accessing `frac[7]` → KeyError. Fixed to `event_cols = sorted(frac.keys())`. Fixed 2026-04-17.

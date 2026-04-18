@@ -4,6 +4,7 @@ Data/
 # Pipeline outputs
 outputs/
 outputs_VM/
+Outputs_17_04
 # Python
 __pycache__/
 *.py[cod]
