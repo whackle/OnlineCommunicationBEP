@@ -50,6 +50,17 @@ def run(cfg: dict, output_dir: Path) -> None:
     with h5py.File(emb_path, "r") as f:
         embeddings: np.ndarray = f["embeddings"][:]
 
+    # Load 10D UMAP embeddings produced by cluster stage (metrics computed here
+    # rather than in raw 64D space, since HDBSCAN clustered in this space)
+    umap_cluster_path = output_dir / "cluster" / "umap_embeddings_cluster.h5"
+    if umap_cluster_path.exists():
+        with h5py.File(umap_cluster_path, "r") as f:
+            emb_reduced: np.ndarray = f["embeddings"][:]
+        print(f"[evaluate] Loaded 10D UMAP embeddings for metric computation ({emb_reduced.shape})")
+    else:
+        emb_reduced = embeddings
+        print("[evaluate] WARNING: umap_embeddings_cluster.h5 not found — computing metrics in raw 64D space")
+
     meta_df = pd.read_parquet(
         output_dir / "extract_embeddings" / "cascade_index.parquet"
     )
@@ -61,7 +72,7 @@ def run(cfg: dict, output_dir: Path) -> None:
 
     # ── 2. Separate noise ─────────────────────────────────────────────────
     non_noise_mask = labels != -1
-    emb_clean = embeddings[non_noise_mask]
+    emb_clean = emb_reduced[non_noise_mask]   # 10D UMAP space for metrics
     lab_clean = labels[non_noise_mask]
     n_clean = int(non_noise_mask.sum())
     n_noise = int((~non_noise_mask).sum())
@@ -137,6 +148,7 @@ def run(cfg: dict, output_dir: Path) -> None:
             else None
         ),
         "bootstrap_sample_size": sample_n,
+        "metric_space": "umap_10d" if umap_cluster_path.exists() else "embedding_64d",
     }
 
     # ── Central metrics block ─────────────────────────────────────────────
