@@ -11,7 +11,7 @@
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`, `hierarchical`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Stubs dropped: `ablation`, `downstream`, `stability` (out of scope). Stub remaining: `eda` |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`, `hierarchical`, `validate_hierarchical`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Stubs dropped: `ablation`, `downstream`, `stability` (out of scope). Stub remaining: `eda`. Prediction strength sub-step stubbed inside `validate_hierarchical`. |
 | **Training v8** (primary) | DONE — 150 epochs on SSH VM, best epoch 147, loss 0.1292. Results in `Outputs_17_04/`. 11 clusters, 1.5% noise, silhouette=0.413, DBCV=+0.618 (10D UMAP space), follower R²=0.941. 79.6% aug fallback — reported as limitation |
 | **Training v9** (sensitivity) | DONE — 150 epochs on SSH VM (192.165.134.28), 18 clusters, 5.0% noise, aug fallback=42.2%. Results in `Outputs_18_04/`. Weaker follower R²=0.714 → v8 selected as primary |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
@@ -56,6 +56,7 @@ OnlineCommunicationBEP/
 │   │   ├── evaluate.py          # --stage evaluate
 │   │   ├── explain.py           # --stage explain (XAI: probes, DiffPool assignments, cluster profiles, augmentation sensitivity)
 │   │   ├── hierarchical.py      # --stage hierarchical (Ward agglomerative on cluster centroids → macro-archetypes)
+│   │   ├── validate_hierarchical.py  # --stage validate_hierarchical (cophenetic, metric sweep, bootstrap ARI, UMAP seed ARI, prediction strength stub)
 │   │   ├── ablation.py          # --stage ablation [DROPPED — out of scope]
 │   │   ├── downstream.py        # --stage downstream [DROPPED — out of scope]
 │   │   └── stability.py         # --stage stability [DROPPED — out of scope]
@@ -747,7 +748,36 @@ outputs/explain/
 2. *DiffPool degenerate assignments:* If pool_2 is collapsed (as observed in v1 diagnostics), assignment matrices will be near-uniform. **Diagnostic:** Check assignment entropy — if close to max entropy for all cascades, the pool level is uninformative. Skip that level in visualizations.
 3. *Augmentation sensitivity floor effect:* If all augmentations produce nearly identical embeddings (alignment ~1.0, as in v1), sensitivity analysis yields no signal. **Prerequisite:** Retrain v2 must achieve alignment < 0.85 for this sub-step to be meaningful.
 
-### Step 4.6 — Ablation Stage (`blueccgl/stages/ablation.py`)
+### Step 4.6 — Validate Hierarchical Stage (`blueccgl/stages/validate_hierarchical.py`) — DONE
+
+**Stage:** `--stage validate_hierarchical`
+**Reads:** `{output_dir}/cluster/umap_embeddings_cluster.h5`, `{output_dir}/cluster/cluster_assignments.parquet`, `{output_dir}/cluster/cluster_persistences.json`, `{output_dir}/extract_embeddings/embeddings.h5`, `{output_dir}/hierarchical/hierarchical_results.json`
+**Writes:** `{output_dir}/validate_hierarchical/validation_report.json`, `figures/metric_sweep.png`, `figures/bootstrap_stability.png`, `figures/umap_seed_stability.png`
+**Dependency:** `hierarchical`
+
+Four fully implemented validation methods + one stub:
+
+1. **Cophenetic correlation** — single scalar measuring how faithfully the Ward dendrogram preserves pairwise centroid distances. Threshold: r > 0.75 = good; r > 0.85 = excellent.
+2. **Multi-cut metric sweep (k=2..6)** — silhouette, Calinski-Harabasz, and Davies-Bouldin computed at each candidate k using all non-noise cascade embeddings in 10D UMAP space. Silhouette capped at 8,000-cascade subsample for speed.
+3. **Bootstrap stability (n=100, frac=0.80)** — stratified resample of cascades within each HDBSCAN cluster → recompute centroids → Ward → cut at k=n_macro → ARI vs original. ARI is permutation-invariant; no Hungarian matching needed.
+4. **UMAP seed stability (10 seeds)** — full UMAP → HDBSCAN → Ward → cut re-run per seed on raw 64D embeddings. ARI computed on cascades non-noise in both original and re-run. Handles degenerate runs (< 2 clusters) gracefully.
+5. **Prediction strength [STUB]** — Tibshirani & Walther (2005). Algorithm fully documented in the stub docstring. Not yet implemented.
+
+**Config keys (all in `validate_hierarchical:` block):** `n_bootstrap` (default 100), `bootstrap_frac` (0.80), `umap_seeds` ([0..9]), `k_sweep_min` (2), `k_sweep_max` (6).
+
+**v8 validation results (2026-05-21, `Outputs_17_04/`):**
+
+| Method | Result | Interpretation |
+|--------|--------|----------------|
+| Cophenetic r | **0.9006** | Excellent — dendrogram is geometrically faithful |
+| Metric sweep | **k=5 wins all three** — sil=0.513, CH=22,252, DB=0.746 | Algorithmic agreement with largest-gap heuristic |
+| Bootstrap ARI | **1.000 ± 0.000** (n=100) | Perfect — macro assignments invariant to 20% cascade removal |
+| UMAP seed ARI | **0.915 ± 0.094** (10 seeds, all valid) | Robust; 6/10 seeds give ARI ≥ 0.945; min=0.775 (above threshold) |
+| Prediction strength | **STUB** | Not yet implemented |
+
+**Key interpretation:** All four implemented methods validate the 5-macro solution. The bootstrap ARI=1.000 reflects that the 11 HDBSCAN centroids are well-separated enough that 20% cascade removal does not move any centroid far enough to change the Ward merge order. The UMAP seed variance (min ARI=0.775) is honest: the dominant archetype structure is seed-independent but ~8% of cascades near macro boundaries can be reassigned under different UMAP projections — the core of each archetype is stable, the boundaries are soft.
+
+### Step 4.7 — Ablation Stage (`blueccgl/stages/ablation.py`)
 
 **Stage:** `--stage ablation`
 **Reads:** `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
@@ -931,6 +961,7 @@ Root cause: augmentations too weak; model solves pretext task via unchanged node
 | 35 | **Implement + run `--stage downstream`** | DROPPED | Out of scope — follower_edge_ratio R²=0.941 already demonstrates embedding quality |
 | 36 | **Implement + run `--stage stability`** | DROPPED | Out of scope — v8 vs v9 sensitivity comparison serves as de-facto stability evidence |
 | 37 | **Implement + run `--stage hierarchical`** | DONE | Ward agglomerative on 11 cluster centroids (10D UMAP). 5 macro-archetypes (natural cut at merge distance 10.05). Outputs: dendrogram, heatmap (rank-normalised), macro profiles, UMAP, bubble chart, archetype_taxonomy.csv. Docs: `Docs/hierarchical_analysis.md` + `Docs/hierarchical_analysis.pdf`. Stage implemented and run 2026-05-21 |
+| 38 | **Implement + run `--stage validate_hierarchical`** | DONE | 4 validation methods + prediction strength stub. Cophenetic r=0.90, metric sweep all-agree k=5, bootstrap ARI=1.000, UMAP seed ARI=0.915±0.094. Full results in `Outputs_17_04/validate_hierarchical/validation_report.json`. Stage implemented and run 2026-05-21 |
 
 **v9 config changes (augmentation fallback fix, 2026-04-17):**
 Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, always below `min_nodes_after_aug=5` → 79.6% fallback to random augmentation.
@@ -1013,6 +1044,8 @@ v8 selected as primary result due to stronger embedding quality (follower R²=0.
 17. **log1p probe transformation for wiener_index + cascade_size (2026-05-21):** Raw Wiener index scales O(N²) and cascade_size is heavily right-skewed — both break the linearity assumption of Ridge regression probing. Global probe R² was catastrophic (cascade_size R²=−6.07). Fixed by applying `y = np.log1p(y)` before fitting. Per-cluster cascade_size R² improved to 0.69–0.91 for 9/11 clusters. `target_transform: "log1p"` field added to probe results JSON. Fix applied in `explain.py:_run_probes`.
 18. **Hierarchical stage as separate pipeline stage (2026-05-21):** Ward agglomerative clustering on HDBSCAN cluster centroids (computed in 10D UMAP space) added as `--stage hierarchical`. Depends only on `--stage cluster`. Natural cut via largest-gap in linkage merge distances; `n_macro` clamped [2,6]. 5-macro solution selected at cut height 10.05 — singleton C6 (Macro 5) retained deliberately as it represents a structurally distinct scaled-up intra-network spreading regime (high follower ratio, large breadth) separable from the smaller follower-driven neutral cascades in Macro 3. The out-of-network diffusion archetype is C8 (Macro 1), not C6.
 19. **Rank normalisation for hierarchical heatmap (2026-05-21):** Min-max normalisation produced multiple cells showing 1.00 for the same property (ties when several clusters share the same median value). Switched to `scipy.stats.rankdata` rank normalisation: cell value = `(rank − 1) / (n_clusters − 1)`, giving strictly ordered values with no spurious ties across clusters.
+20. **"Out-of-network diffusion" replaces "algorithmic amplification" (2026-05-21):** The original framing attributed non-follower edge propagation to platform algorithmic amplification — a causal claim not supportable from follower-graph data alone (temporal confound; non-follower edges conflate search, second-order reposts, hashtag discovery, and feed surfacing). Replaced throughout with "out-of-network diffusion" (structural, mechanism-agnostic) grounded in Granovetter (1973) weak-tie bridging. C8 (follower ratio 0.52, depth 5) is the out-of-network diffusion archetype; C6 (follower ratio 0.875) is scaled-up intra-network spreading. Old planning docs (`Initial_Plan.md`, `Project_Plan_Draft.md`, `Palestine_Bluesky_Project_Plan.md`, `latex/main.tex`, `latex/palestine_plan.tex`) marked DEPRECATED.
+21. **`--stage validate_hierarchical` as a separate post-hierarchical stage (2026-05-21):** Four validation methods (cophenetic correlation, multi-cut metric sweep, bootstrap ARI, UMAP seed ARI) implemented as `blueccgl/stages/validate_hierarchical.py`. Prediction strength (Tibshirani & Walther 2005) stubbed with full algorithm in docstring. Depends on `--stage hierarchical`. All four methods validate the 5-macro solution; see Step 4.6 for full results.
 
 ## Key Decisions Still Open
 
