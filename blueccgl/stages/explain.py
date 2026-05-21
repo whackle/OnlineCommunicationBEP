@@ -215,6 +215,9 @@ def _run_probes(
 
     # Categorical properties → classification; others → regression
     categorical_props = {"event_window"}
+    # log1p-transform heavy-tailed graph metrics before probing — raw values span
+    # 4–5 orders of magnitude (Wiener scales O(N²)), making linear R² meaningless
+    log_transform_props = {"wiener_index", "cascade_size"}
 
     scaler = StandardScaler()
     emb_scaled = scaler.fit_transform(embeddings)
@@ -228,9 +231,12 @@ def _run_probes(
             continue
 
         y = df[prop].values.astype(float)
+        if prop in log_transform_props:
+            y = np.log1p(y)
         is_cat = prop in categorical_props
 
-        print(f"[explain/probe]   {prop} ({'classification' if is_cat else 'regression'}) ...", end=" ", flush=True)
+        label = "log1p-regression" if prop in log_transform_props else ("classification" if is_cat else "regression")
+        print(f"[explain/probe]   {prop} ({label}) ...", end=" ", flush=True)
 
         # Global score
         if is_cat:
@@ -302,6 +308,7 @@ def _run_probes(
 
         results[prop] = {
             "metric": metric_name,
+            "target_transform": "log1p" if prop in log_transform_props else "none",
             "global_score": global_score,
             "global_ci_lo": ci[0],
             "global_ci_hi": ci[1],

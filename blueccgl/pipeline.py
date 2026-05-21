@@ -21,9 +21,12 @@ ALL_STAGES: list[str] = [
     "cluster",
     "evaluate",
     "explain",
-    "ablation",
-    "downstream",
-    "stability",
+    "hierarchical",
+    "validate_hierarchical",
+    # dropped stages — stubs exist but will not be run
+    # "ablation",
+    # "downstream",
+    # "stability",
 ]
 
 # Maps each stage to the output checkpoint file it produces.
@@ -38,9 +41,8 @@ STAGE_CHECKPOINTS: dict[str, str] = {
     "cluster":              "cluster/cluster_assignments.parquet",
     "evaluate":             "evaluate/metrics.json",
     "explain":              "explain/explanation_report.json",
-    "ablation":             "ablation/comparison_table.csv",
-    "downstream":           "downstream/results.json",
-    "stability":            "stability/stability_report.json",
+    "hierarchical":            "hierarchical/hierarchical_results.json",
+    "validate_hierarchical":   "validate_hierarchical/validation_report.json",
 }
 
 # Upstream dependency: each stage requires its upstream checkpoint to exist.
@@ -55,9 +57,8 @@ STAGE_DEPS: dict[str, str | None] = {
     "cluster":              "extract_embeddings",
     "evaluate":             "cluster",
     "explain":              "evaluate",
-    "ablation":             "build_pyg_dataset",
-    "downstream":           "train",
-    "stability":            "extract_embeddings",
+    "hierarchical":            "cluster",
+    "validate_hierarchical":   "hierarchical",
 }
 
 

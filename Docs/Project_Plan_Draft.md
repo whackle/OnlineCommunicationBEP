@@ -1,4 +1,6 @@
 
+> **DEPRECATED** — superseded by `IMPLEMENTATION_PLAN.md`. Terminology in this document (e.g. "algorithmic amplification") is outdated; current framing uses "out-of-network diffusion".
+
 ---
 
 ### 1. Introduction

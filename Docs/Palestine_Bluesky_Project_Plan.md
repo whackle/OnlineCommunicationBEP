@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by `IMPLEMENTATION_PLAN.md`. Terminology in this document (e.g. "algorithmic amplification") is outdated; current framing uses "out-of-network diffusion".
+
 # BlueCCGL: Unsupervised Discovery of Crisis Information Cascade Archetypes on Bluesky
 
 ## The Israel-Palestine Conflict as a Natural Experiment in Decentralized Crisis Communication

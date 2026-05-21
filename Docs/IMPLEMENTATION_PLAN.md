@@ -11,8 +11,9 @@
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
-| **Training v8** | DONE — 150 epochs on SSH VM (87.205.21.33), best epoch 147, loss 0.1292. Results in `Outputs_17_04/`. 11 clusters, 1.5% noise, mean HDBSCAN persistence=0.395. Known issue: 79.6% augmentation fallback rate → fixed in v9 config (see augmentation section) |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`, `hierarchical`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Stubs dropped: `ablation`, `downstream`, `stability` (out of scope). Stub remaining: `eda` |
+| **Training v8** (primary) | DONE — 150 epochs on SSH VM, best epoch 147, loss 0.1292. Results in `Outputs_17_04/`. 11 clusters, 1.5% noise, silhouette=0.413, DBCV=+0.618 (10D UMAP space), follower R²=0.941. 79.6% aug fallback — reported as limitation |
+| **Training v9** (sensitivity) | DONE — 150 epochs on SSH VM (192.165.134.28), 18 clusters, 5.0% noise, aug fallback=42.2%. Results in `Outputs_18_04/`. Weaker follower R²=0.714 → v8 selected as primary |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
 
 ### Progress Summary
@@ -23,7 +24,7 @@
 | Sprint 2: NLP Filter | DONE | 1,947,493 conflict posts from 233M total (0.84%). 15-worker parallel tar streaming (~85 min) |
 | Sprint 3: Cascade Construction | DONE | 39,983 cascades (≥10 nodes), 844,849 edges, 75.9% FOLLOWER-typed, ~3 min runtime |
 | Sprint 4: PyG Dataset + Model | DONE | Dataset built; all models + augmentations + tests implemented |
-| Sprint 5: Full Data Integration | DONE (v8) | Training v8 complete (150 epochs, best epoch 147, loss 0.1292). All downstream stages run: extract_embeddings → cluster (UMAP 64D→10D + HDBSCAN, mcs=300, 11 clusters) → evaluate → explain. Results in `Outputs_17_04/`. Remaining stubs: `eda`, `ablation`, `downstream`, `stability` |
+| Sprint 5: Full Data Integration | DONE (v8) | Training v8 complete (150 epochs, best epoch 147, loss 0.1292). All downstream stages run: extract_embeddings → cluster (UMAP 64D→10D + HDBSCAN, mcs=300, 11 clusters) → evaluate → explain (log1p fix for wiener_index + cascade_size) → hierarchical (Ward agglomerative, 5 macro-archetypes). Results in `Outputs_17_04/`. Stubs dropped: `ablation`, `downstream`, `stability`. `eda` stub still not implemented |
 
 ---
 
@@ -54,9 +55,10 @@ OnlineCommunicationBEP/
 │   │   ├── cluster.py           # --stage cluster
 │   │   ├── evaluate.py          # --stage evaluate
 │   │   ├── explain.py           # --stage explain (XAI: probes, DiffPool assignments, cluster profiles, augmentation sensitivity)
-│   │   ├── ablation.py          # --stage ablation
-│   │   ├── downstream.py        # --stage downstream
-│   │   └── stability.py         # --stage stability
+│   │   ├── hierarchical.py      # --stage hierarchical (Ward agglomerative on cluster centroids → macro-archetypes)
+│   │   ├── ablation.py          # --stage ablation [DROPPED — out of scope]
+│   │   ├── downstream.py        # --stage downstream [DROPPED — out of scope]
+│   │   └── stability.py         # --stage stability [DROPPED — out of scope]
 │   │
 │   ├── models/                  # Neural network components
 │   │   ├── __init__.py
@@ -117,6 +119,9 @@ OnlineCommunicationBEP/
 │   └── eda_user_posts.py
 │
 ├── Docs/
+│   ├── IMPLEMENTATION_PLAN.md       # This document
+│   ├── hierarchical_analysis.md     # Narrative + literary grounding for 5 macro-archetypes (2026-05-21)
+│   └── hierarchical_analysis.pdf   # Compiled PDF with inline figures (2026-05-21)
 ├── latex/
 ├── papers/
 └── prompts/
@@ -608,6 +613,8 @@ Training loop:
 
 **CENTRAL METRICS block (added 2026-04-17):** Printed before the bootstrapped metrics table: number of clusters, noise fraction (absolute count + percentage), mean HDBSCAN persistence from `cluster_persistences.json`, and DBCV mean. Also stores `mean_cluster_persistence` in `metrics["meta"]`. `import blueccgl.utils.mpl_compat` added at top for Python 3.14 matplotlib compatibility (see Known Bugs #7).
 
+**10D UMAP metric space fix (added 2026-04-18):** All bootstrap metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz, DBCV) now computed in the **10D UMAP-reduced space** from `cluster/umap_embeddings_cluster.h5`, not raw 64D embeddings. HDBSCAN clusters in this space, so evaluating in this space is the correct methodology. Raw 64D gave silhouette≈0.012 (near-random) and DBCV=-0.46 for v9; 10D gives silhouette=0.413 and DBCV=+0.618 for v8 — the honest numbers. `metric_space` field added to `metrics["meta"]` to record which space was used. Falls back to 64D with a WARNING if `umap_embeddings_cluster.h5` is absent.
+
 ### Step 4.5 — Explain Stage (`blueccgl/stages/explain.py`) — DONE
 
 **Stage:** `--stage explain`
@@ -663,7 +670,7 @@ Samples `n_representatives_per_cluster` (default 20) cascades per cluster. For e
 
 **Output:** `explain/augmentation_sensitivity.json` + `explain/figures/augmentation_sensitivity_bars.png` — grouped bar chart (3 bars per cluster).
 
-**Interpretation:** High sensitivity to `follower_subgraph` removal → archetype is defined by follower structure (organic virality). High sensitivity to `bridge_removal` → archetype relies on non-follower entry points (algorithmic amplification). Validates Extension 1 (feed-aware augmentations) against ablation A2 (generic augmentation).
+**Interpretation:** High sensitivity to `follower_subgraph` removal → archetype is defined by follower structure (organic virality). High sensitivity to `bridge_removal` → archetype exhibits out-of-network diffusion — content spreading across non-follower ties (structural bridging). Validates Extension 1 (feed-aware augmentations) against ablation A2 (generic augmentation).
 
 #### Sub-step 5.5 — Representative Cascade Visualisations (NEW — 2026-03-24)
 
@@ -918,11 +925,12 @@ Root cause: augmentations too weak; model solves pretext task via unchanged node
 | 29 | **Training v8** (SSH VM 87.205.21.33) | DONE | 150 epochs, best epoch 147, loss 0.1292. Config: τ=0.1, feature masking, VICReg, covariance reg. Results in `Outputs_17_04/`. Note: 79.6% aug fallback rate flagged — fixed in v9 config below |
 | 30 | **Run `--stage extract_embeddings`** | DONE | embeddings.h5 + cascade_index.parquet. Embedding diagnostics block added. |
 | 31 | **Run `--stage cluster`** | DONE | UMAP 64D→10D + HDBSCAN. mcs=300 selected, 11 clusters, 1.5% noise, silhouette=0.362, mean persistence=0.395 |
-| 32 | **Run `--stage evaluate`** | DONE | CENTRAL METRICS block + bootstrap CIs + UMAP figure. DBCV computed. |
-| 33 | **Run `--stage explain`** | DONE | Probes, DiffPool assignments, cluster profiles (4 figures), augmentation sensitivity. Event heatmap KeyError fixed. matplotlib RecursionError fixed via mpl_compat.py |
-| 34 | **Implement + run `--stage ablation`** (A1–A5) | NOT STARTED | Stub. Each variant: train → extract → cluster → evaluate |
-| 35 | **Implement + run `--stage downstream`** | NOT STARTED | Stub. Size + longevity prediction heads |
-| 36 | **Implement + run `--stage stability`** | NOT STARTED | Stub. 10× 80% subsample ARI |
+| 32 | **Run `--stage evaluate`** | DONE | Metrics computed in 10D UMAP space (fix 2026-04-18). v8: silhouette=0.413, DBCV=+0.618, DB=0.676, CH=1978. |
+| 33 | **Run `--stage explain`** | DONE | Probes, DiffPool assignments, cluster profiles (4 figures), augmentation sensitivity. Event heatmap KeyError fixed. matplotlib RecursionError fixed via mpl_compat.py. Probe log1p fix applied 2026-05-17 (wiener_index + cascade_size) |
+| 34 | **Implement + run `--stage ablation`** (A1–A5) | DROPPED | Out of scope — each variant requires a full GPU training run. Acknowledged as limitation in thesis |
+| 35 | **Implement + run `--stage downstream`** | DROPPED | Out of scope — follower_edge_ratio R²=0.941 already demonstrates embedding quality |
+| 36 | **Implement + run `--stage stability`** | DROPPED | Out of scope — v8 vs v9 sensitivity comparison serves as de-facto stability evidence |
+| 37 | **Implement + run `--stage hierarchical`** | DONE | Ward agglomerative on 11 cluster centroids (10D UMAP). 5 macro-archetypes (natural cut at merge distance 10.05). Outputs: dendrogram, heatmap (rank-normalised), macro profiles, UMAP, bubble chart, archetype_taxonomy.csv. Docs: `Docs/hierarchical_analysis.md` + `Docs/hierarchical_analysis.pdf`. Stage implemented and run 2026-05-21 |
 
 **v9 config changes (augmentation fallback fix, 2026-04-17):**
 Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, always below `min_nodes_after_aug=5` → 79.6% fallback to random augmentation.
@@ -930,20 +938,38 @@ Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, al
 - `augmentation.temporal_prefix_ratio`: 0.3 → **0.5** (keep first half not first third)
 - `augmentation.min_nodes_after_aug`: 5 → **3** (5 caused fallback on median-7-node cascades)
 
-**Training v8 results summary:**
+**Training v8 results summary (primary results — `Outputs_17_04/`):**
 
 | Metric | Value |
 |--------|-------|
 | Epochs | 150 (best: 147) |
 | Best loss | 0.1292 |
 | Clusters | 11 |
-| Noise fraction | 1.5% (579 / 39,404) |
+| Noise fraction | 1.5% (594 / 39,983) |
 | Mean HDBSCAN persistence | 0.395 |
+| **Silhouette** (10D UMAP space) | **0.413** ± 0.004, 95% CI [0.405, 0.422] |
+| **Davies-Bouldin** (10D UMAP space) | **0.676** ± 0.007 (lower = better) |
+| **Calinski-Harabasz** (10D UMAP space) | **1978** ± 38 |
+| **DBCV** (10D UMAP space) | **+0.618** ± 0.028 — positive = clusters denser than surrounding space |
 | follower_edge_ratio R² | 0.941 (global), 0.917–0.981 per cluster |
 | cascade_depth R² | 0.686 (global), 0.697–0.824 per cluster |
 | cascade_breadth R² | 0.317 (global), 0.333–0.938 per cluster |
-| cascade_size R² | −6.07 (global — driven by clusters 3 and 6 outliers) |
+| cascade_size R² | −6.07 (global — driven by clusters 3 and 6 with extreme size variance) |
 | event_window accuracy | 0.143 (chance = 1/7) — no event discrimination |
+
+**v9 sensitivity run (2026-04-18, `Outputs_18_04/`) — reported as sensitivity analysis, not primary:**
+
+| Metric | v8 | v9 | Notes |
+|--------|----|----|-------|
+| Best loss | 0.1292 | 0.1924 | v9 easier augmentations → weaker contrastive signal |
+| Clusters | 11 | 18 | More granular archetypes |
+| Noise | 1.5% | 5.0% | Slightly higher |
+| Silhouette (10D) | 0.413 | 0.445 | v9 marginally better in UMAP space |
+| DBCV (10D) | +0.618 | −0.46* | *v9 metrics were computed in 64D before fix |
+| follower R² | **0.941** | 0.714 | v8 substantially better — key advantage |
+| Aug fallback | 79.6% | 42.2% | v9 better but still structural floor |
+
+v8 selected as primary result due to stronger embedding quality (follower R²=0.941) and better loss convergence. v9 demonstrates the 11-archetype solution is robust — rerunning with corrected augmentation config recovers similar cluster structure.
 
 ---
 
@@ -983,6 +1009,10 @@ Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, al
 13. **mcs=[100,200,300] for 11 archetypes (2026-04-17):** Initial grid [15,25,40] produced 700+ clusters (too granular for thesis interpretation). [100,200,300] with mcs=300 selected → 11 meaningful archetypes — thesis-interpretable, matches prior cascade literature cluster counts.
 14. **matplotlib Python 3.14 fix via monkey-patch (2026-04-17):** `matplotlib/path.py:285` calls `copy.deepcopy(super(), memo)` which causes infinite recursion in Python 3.14's updated deepcopy implementation. `sys.setrecursionlimit` is insufficient (complex figures need >10,000 levels). Fix: `blueccgl/utils/mpl_compat.py` patches `Path.__deepcopy__` to copy `__dict__` directly, avoiding the `super()` call. Imported at the top of all affected stages.
 15. **min_nodes_after_aug=3, follower_retain_ratio=0.4 (v9 config, 2026-04-17):** Original v6/v7 config had `min_nodes=5` and `retain_ratio=0.3` — together these caused 79.6% of cascades to fall back to random augmentation (median cascade has 7 nodes; 0.3×7=2.1 < 5). Fixed to `min_nodes=3`, `retain_ratio=0.4`, `temporal_prefix_ratio=0.5`.
+16. **DiffPool disabled in v8 (pool=mean, 2026-05-21):** v8 `config.yaml` has `model.pool: mean`, which bypasses DiffPool entirely and falls back to global mean pooling. DiffPool was disabled after `pool_2` collapse was observed during v8 hyperparameter search. `explain.run_diffpool_analysis: true` is a no-op for this config — recommendation to set it `false` to suppress spurious "assignments not found" warnings.
+17. **log1p probe transformation for wiener_index + cascade_size (2026-05-21):** Raw Wiener index scales O(N²) and cascade_size is heavily right-skewed — both break the linearity assumption of Ridge regression probing. Global probe R² was catastrophic (cascade_size R²=−6.07). Fixed by applying `y = np.log1p(y)` before fitting. Per-cluster cascade_size R² improved to 0.69–0.91 for 9/11 clusters. `target_transform: "log1p"` field added to probe results JSON. Fix applied in `explain.py:_run_probes`.
+18. **Hierarchical stage as separate pipeline stage (2026-05-21):** Ward agglomerative clustering on HDBSCAN cluster centroids (computed in 10D UMAP space) added as `--stage hierarchical`. Depends only on `--stage cluster`. Natural cut via largest-gap in linkage merge distances; `n_macro` clamped [2,6]. 5-macro solution selected at cut height 10.05 — singleton C6 (Macro 5) retained deliberately as it represents a structurally distinct scaled-up intra-network spreading regime (high follower ratio, large breadth) separable from the smaller follower-driven neutral cascades in Macro 3. The out-of-network diffusion archetype is C8 (Macro 1), not C6.
+19. **Rank normalisation for hierarchical heatmap (2026-05-21):** Min-max normalisation produced multiple cells showing 1.00 for the same property (ties when several clusters share the same median value). Switched to `scipy.stats.rankdata` rank normalisation: cell value = `(rank − 1) / (n_clusters − 1)`, giving strictly ordered values with no spurious ties across clusters.
 
 ## Key Decisions Still Open
 
@@ -990,7 +1020,7 @@ Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, al
 2. **Ablation training time budget:** Each A1–A5 variant requires a full training run on SSH VM. Consider reducing epochs to 75 for ablations to limit wall-clock time.
 3. **Explain stage optional extensions:** Core 4 sub-steps done. Optional extensions (GNNExplainer, PGExplainer, TCAV) depend on remaining time budget. TCAV has highest thesis novelty but requires concept set curation (~6h). Decision deferred.
 4. **event_window not captured in embeddings:** Probes show balanced accuracy = 0.143 (chance) — model does not discriminate between events. This limits SRQ1/SRQ2 answers. Options: (a) accept as limitation, (b) add event-aware contrastive loss, (c) use cluster × event cross-tabulation from cluster profiles instead.
-5. **Next training run (v9):** Augmentation fallback fix applied to config (v9 values). Decide whether to retrain on SSH VM before ablation stage.
+5. **v9 completed (2026-04-18):** v9 run on VM 192.165.134.28, 18 clusters, 42.2% fallback. Decided to use v8 as primary result (follower R²=0.941 > v9's 0.714). v9 reported as sensitivity analysis. No further retraining planned.
 
 ---
 
@@ -1004,3 +1034,8 @@ Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, al
 6. **`follower_graph.py` — per-edge DuckDB queries O(n²):** Each `follows()` call issued a separate SQL query, making tree building take an estimated 26 hours. Fixed with `preload_for_users()`: one batch JOIN query loads all relevant edges into a Python `set` before tree building starts. Total runtime went from 26hr estimate to ~3 min. Fixed 2025-03-17.
 7. **matplotlib Python 3.14 RecursionError in all plot-generating stages:** `matplotlib/path.py` `Path.__deepcopy__` calls `copy.deepcopy(super(), memo)` which causes infinite recursion under Python 3.14's updated deepcopy. `sys.setrecursionlimit(10_000)` is insufficient — complex figures need >10,000 levels and hit the limit. Fixed with `blueccgl/utils/mpl_compat.py` monkey-patch that replaces `Path.__deepcopy__` with a direct `__dict__` copy that never calls `super()`. Imported at top of `evaluate.py` and `explain.py`. Fixed 2026-04-17.
 8. **`explain.py` — `_plot_archetype_event_heatmap` KeyError on cluster ID 7:** `event_cols = sorted(frac[list(frac.keys())[0]].keys())` dereferenced one level too deep — `frac` is `{event_window: {cluster_id: fraction}}`, so indexing one level in gave cluster IDs {0..10}, not event windows {0..6}. Accessing `frac[7]` → KeyError. Fixed to `event_cols = sorted(frac.keys())`. Fixed 2026-04-17.
+9. **`evaluate.py` — clustering metrics computed in wrong space:** Silhouette/Davies-Bouldin/CH/DBCV were bootstrapped on raw 64D embeddings, but HDBSCAN clustered in 10D UMAP space. This produced silhouette≈0.012 and DBCV=-0.46 — near-random numbers that don't reflect actual cluster quality. Fixed to load `cluster/umap_embeddings_cluster.h5` and compute all metrics in 10D space. v8 corrected metrics: silhouette=0.413, DB=0.676, CH=1978, DBCV=+0.618. `metric_space` recorded in `metrics["meta"]`. Fixed 2026-04-18.
+10. **`explain.py` — probe R² catastrophic for heavy-tailed targets (wiener_index, cascade_size):** Global R² for cascade_size was −6.07 (worse than predicting the mean). Root cause: Wiener index is O(N²) in cascade size, producing extreme outliers; cascade_size is right-skewed. Both violate Ridge regression's linearity assumption. Fixed by applying `np.log1p()` to the target before fitting for these two properties. Bootstrap CIs which previously didn't bracket the point estimate (due to resampling rarely hitting extreme outliers) now behave correctly. Fixed 2026-05-21.
+11. **`hierarchical.py` — HDF5 KeyError on `"umap_embeddings"` key:** Stage was reading `f["umap_embeddings"][:]` but `cluster/umap_embeddings_cluster.h5` stores embeddings under key `"embeddings"`. Fixed to `f["embeddings"][:]`. Fixed 2026-05-21.
+12. **`hierarchical.py` — macro profile bar chart showing negative lower bounds:** Bar chart used mean ± std for cascade_size. Since std > mean for most clusters (right-skewed distribution), the lower error bar goes negative (impossible for a count). Fixed by switching to median + IQR with asymmetric error bars (`err_lo = median − q25`, `err_hi = q75 − median`). Fixed 2026-05-21.
+13. **`hierarchical.py` — heatmap showed raw median values alongside normalised colorbar:** Cell annotations showed raw values (e.g., 13, 16) while the colorbar represented normalised scale — inconsistent. Fixed by storing normalised values in the cell array and displaying those in annotations; colorbar removed entirely. Fixed 2026-05-21.

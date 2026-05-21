@@ -173,17 +173,13 @@ def _run_stage(stage: str, cfg: dict, output_dir: Path, seed: int, device: str, 
         from blueccgl.stages.explain import run
         run(cfg, output_dir, device)
 
-    elif stage == "ablation":
-        from blueccgl.stages.ablation import run
-        run(cfg, output_dir, device, seed)
+    elif stage == "hierarchical":
+        from blueccgl.stages.hierarchical import run
+        run(cfg, output_dir)
 
-    elif stage == "downstream":
-        from blueccgl.stages.downstream import run
-        run(cfg, output_dir, device, seed)
-
-    elif stage == "stability":
-        from blueccgl.stages.stability import run
-        run(cfg, output_dir, seed)
+    elif stage == "validate_hierarchical":
+        from blueccgl.stages.validate_hierarchical import run
+        run(cfg, output_dir)
 
     else:
         raise ValueError(f"No implementation for stage: {stage}")
