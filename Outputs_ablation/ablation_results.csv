@@ -1,9 +1,0 @@
-variant,encoder,aug,sentiment,status,sil_mean,sil_ci_lo,sil_ci_hi,db_mean,db_ci_lo,db_ci_hi,ch_mean,ch_ci_lo,ch_ci_hi,dbcv_mean,dbcv_ci_lo,dbcv_ci_hi,n_clusters,noise_pct,n_clustered,persistence_mean,best_loss,best_epoch,final_loss,total_epochs,total_time_min,aug_fallback_rate,output_dir
-rgcn_feed_sent,R-GCN,feed-aware,yes,done,0.4133,0.4047,0.4215,0.6757,0.6612,0.6901,1978.7137,1904.5699,2056.0826,0.6181,0.5633,0.6667,11,1.49,39389,0.3951,0.12921,147,0.13127,150,64.6,0.797,Outputs_17_04
-gcn_feed_sent,GCN,feed-aware,yes,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/gcn_feed_sent
-rgcn_rand_sent,R-GCN,random,yes,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/rgcn_rand_sent
-rgcn_feed_nosent,R-GCN,feed-aware,no,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/rgcn_feed_nosent
-gcn_rand_sent,GCN,random,yes,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/gcn_rand_sent
-gcn_feed_nosent,GCN,feed-aware,no,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/gcn_feed_nosent
-rgcn_rand_nosent,R-GCN,random,no,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/rgcn_rand_nosent
-gcn_rand_nosent,GCN,random,no,missing,,,,,,,,,,,,,,,,,,,,,,,Outputs_ablation/gcn_rand_nosent
