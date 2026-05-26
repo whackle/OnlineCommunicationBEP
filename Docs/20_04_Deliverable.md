@@ -389,9 +389,9 @@ C0 (n=355) and C1 (n=670) both exhibit **100% negative sentiment** with zero sta
 
 #### Family 2 — Near-Negative Mixed Cascades (C2)
 
-C2 (n=785) is structurally similar to C1 (depth=3, breadth=4, follower ratio=0.76) but its sentiment composition departs from uniformity: 82% negative, 18% positive. The 18% positive admixture distinguishes these from the pure-negative clusters; these are predominantly negative threads that contain a visible minority of positive responses — likely solidarity posts, expressions of hope, or counter-voices within an otherwise distressed discussion.
+C2 (n=785) is structurally similar to C1 (depth=3, breadth=4, follower ratio=0.76) but its sentiment composition departs from uniformity: 82% negative, 18% positive. The 18% positive admixture distinguishes these from the pure-negative clusters; these are predominantly negative repost cascades where a visible minority of nodes carry positive sentiment — likely rooted in solidarity posts, expressions of hope, or counter-narrative content that co-spreads alongside the dominant negative framing.
 
-**Interpretation.** C2 represents the typical mixed reaction thread where grief or outrage is dominant but some hope or solidarity is visible — the characteristic discourse pattern of communities processing a traumatic event that admits of both emotional response and community cohesion.
+**Interpretation.** C2 represents the mixed-sentiment propagation archetype where negative-sentiment content is dominant but solidarity or counter-narrative posts co-spread — a pattern consistent with communities where emotional reaction and community cohesion signals propagate simultaneously through the same repost network.
 
 ---
 

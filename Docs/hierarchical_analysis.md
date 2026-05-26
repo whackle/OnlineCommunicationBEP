@@ -248,7 +248,7 @@ deeper, faster, and more broadly than true news on Twitter — attributing this 
 novelty and emotional complexity of contested content. Macro 2 cascades are candidates for
 precisely this dynamic: their structural size and the presence of positive sentiment alongside
 dominant negative framing suggests contested or counter-narrative content that attracts engagement
-from multiple directions of the debate.
+from multiple communities across the repost network.
 
 The convergence behaviour literature (Starbird & Palen 2010; Stab et al. 2019) identifies
 "helpers" and "counter-narrative" actors as distinct convergence roles in crisis communication on
