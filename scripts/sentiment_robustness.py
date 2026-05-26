@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 
 def main():
@@ -40,8 +42,14 @@ def main():
     rob_dir = out_dir / "robustness"
     rob_dir.mkdir(exist_ok=True)
 
+    steps = tqdm(
+        ["load", "analysis1", "project", "umap", "cluster2", "baseline", "save"],
+        desc="robustness", unit="step", ncols=80,
+    )
+
     # ── Load data ──────────────────────────────────────────────────────────
-    print("[robustness] Loading embeddings and metadata...")
+    steps.set_description("loading data")
+    t0 = time.time()
     with h5py.File(out_dir / "extract_embeddings" / "embeddings.h5", "r") as f:
         embeddings = f["embeddings"][:]                  # [N, 64]
 
@@ -51,68 +59,76 @@ def main():
     cluster_assignments = pd.read_parquet(
         out_dir / "cluster" / "cluster_assignments.parquet"
     )
-
-    # Merge to align rows
     df = cascade_index.merge(cluster_assignments[["cascade_id", "cluster_label"]], on="cascade_id")
     assert len(df) == len(embeddings), "Row count mismatch between embeddings and index"
 
-    labels = df["cluster_label"].values                  # HDBSCAN labels (-1 = noise)
+    labels = df["cluster_label"].values
     non_noise = labels != -1
-    print(f"[robustness] {non_noise.sum():,} non-noise cascades / {len(labels):,} total")
 
-    # Load UMAP-10D (same space metrics were computed in)
-    umap_path = out_dir / "cluster" / "umap_embeddings_cluster.h5"
-    with h5py.File(umap_path, "r") as f:
+    with h5py.File(out_dir / "cluster" / "umap_embeddings_cluster.h5", "r") as f:
         umap10 = f["embeddings"][:]                      # [N, 10]
 
-    # ── Extract sentiment features ──────────────────────────────────────────
     sent_cols = ["sentiment_neg", "sentiment_neu", "sentiment_pos"]
     if all(c in df.columns for c in sent_cols):
-        sent_mat = df[sent_cols].values.astype(np.float32)  # [N, 3]
+        sent_mat = df[sent_cols].values.astype(np.float32)
     elif "sentiment_composition" in df.columns:
         sent_mat = np.stack(df["sentiment_composition"].values).astype(np.float32)
     else:
-        # Fall back: derive from cascade_index sentiment fields
-        raise RuntimeError(
-            "sentiment columns not found in cascade_index — "
-            "expected sentiment_neg / sentiment_neu / sentiment_pos"
-        )
+        raise RuntimeError("sentiment columns not found in cascade_index")
+
+    tqdm.write(f"  loaded {len(embeddings):,} cascades ({non_noise.sum():,} non-noise)  [{time.time()-t0:.1f}s]")
+    steps.update(1)
 
     results = {}
 
     # ── Analysis 1: Sentiment-only HDBSCAN ────────────────────────────────
-    print("\n[robustness] Analysis 1: HDBSCAN on raw sentiment_composition (3D)...")
+    steps.set_description("analysis 1: sentiment-only HDBSCAN")
+    t0 = time.time()
     sent_labels, sent_metrics = _cluster_and_score(
         sent_mat, min_cluster_size=300, seed=args.seed, label="sentiment-only"
     )
     results["sentiment_only"] = sent_metrics
-    _print_metrics("Sentiment-only (3D)", sent_metrics)
+    tqdm.write(f"  sentiment-only → k={sent_metrics.get('n_clusters')}  "
+               f"noise={sent_metrics.get('noise_pct')}%  "
+               f"sil={sent_metrics.get('silhouette')}  [{time.time()-t0:.1f}s]")
+    steps.update(1)
 
-    # ── Analysis 2: Sentiment-projected-out recluster ──────────────────────
-    print("\n[robustness] Analysis 2: Projecting sentiment subspace out of 64D embeddings...")
+    # ── Analysis 2a: Project out sentiment ────────────────────────────────
+    steps.set_description("analysis 2: projecting out sentiment")
+    t0 = time.time()
     emb_clean, sent_var_explained = _project_out_sentiment(embeddings, sent_mat)
-    print(f"  Sentiment subspace R² in original embeddings: {sent_var_explained:.3f}")
+    tqdm.write(f"  sentiment R² in 64D embeddings: {sent_var_explained:.3f}  [{time.time()-t0:.1f}s]")
+    steps.update(1)
 
-    # UMAP the cleaned embeddings and recluster
+    # ── Analysis 2b: UMAP on cleaned embeddings ───────────────────────────
+    # verbose=True activates UMAP's own internal tqdm epoch bar
+    steps.set_description("analysis 2: UMAP 64D→10D  (slow — see bar below)")
+    tqdm.write("  UMAP 64D→10D on sentiment-free embeddings (this takes ~10-15 min on CPU)...")
     import umap as umap_lib
-    import hdbscan as hdbscan_lib
-
-    print("  UMAP 64D→10D on sentiment-free embeddings...")
-    rng = np.random.default_rng(args.seed)
+    t0 = time.time()
     reducer = umap_lib.UMAP(
         n_components=10, n_neighbors=15, min_dist=0.1,
-        random_state=args.seed, verbose=False,
+        random_state=args.seed, verbose=True,
     )
     umap_clean = reducer.fit_transform(emb_clean).astype(np.float32)
+    tqdm.write(f"  UMAP done  [{time.time()-t0:.1f}s]")
+    steps.update(1)
 
+    # ── Analysis 2c: HDBSCAN + score on cleaned UMAP ─────────────────────
+    steps.set_description("analysis 2: HDBSCAN + score")
+    t0 = time.time()
     clean_labels, clean_metrics = _cluster_and_score(
         umap_clean, min_cluster_size=300, seed=args.seed, label="sentiment-projected-out"
     )
     results["sentiment_projected_out"] = clean_metrics
     results["sentiment_subspace_r2"] = round(float(sent_var_explained), 4)
-    _print_metrics("Sentiment-projected-out (UMAP-10D)", clean_metrics)
+    tqdm.write(f"  projected-out → k={clean_metrics.get('n_clusters')}  "
+               f"noise={clean_metrics.get('noise_pct')}%  "
+               f"sil={clean_metrics.get('silhouette')}  [{time.time()-t0:.1f}s]")
+    steps.update(1)
 
     # ── Analysis 3: v8 baseline metrics for comparison ────────────────────
+    steps.set_description("loading v8 baseline metrics")
     metrics_path = out_dir / "evaluate" / "metrics.json"
     if metrics_path.exists():
         v8 = json.loads(metrics_path.read_text())
@@ -123,12 +139,19 @@ def main():
             "n_clusters": v8.get("meta", {}).get("n_clusters"),
             "noise_pct": v8.get("meta", {}).get("noise_pct"),
         }
-        _print_metrics("v8 baseline (10D UMAP)", results["v8_baseline"])
+        r = results["v8_baseline"]
+        tqdm.write(f"  v8 baseline: k={r.get('n_clusters','?')}  noise={r.get('noise_pct','?')}%  "
+                   f"sil={r.get('silhouette','?')}  DB={r.get('davies_bouldin','?')}  "
+                   f"DBCV={r.get('dbcv','?')}")
+    else:
+        tqdm.write("  v8 baseline metrics.json not found — skipping comparison")
+    steps.update(1)
 
     # ── Summary table ──────────────────────────────────────────────────────
-    print("\n[robustness] ── Summary ──────────────────────────────────────────")
-    print(f"{'Condition':<35} {'Sil':>6} {'DB':>6} {'DBCV':>7} {'K':>4} {'Noise%':>7}")
-    print("-" * 65)
+    steps.set_description("saving results")
+    tqdm.write("\n[robustness] ── Summary ──────────────────────────────────────────")
+    tqdm.write(f"{'Condition':<35} {'Sil':>6} {'DB':>6} {'DBCV':>7} {'K':>4} {'Noise%':>7}")
+    tqdm.write("-" * 65)
     for key, label in [
         ("v8_baseline",              "v8 full model (10D UMAP)   "),
         ("sentiment_only",           "Sentiment-only (3D)        "),
@@ -140,27 +163,27 @@ def main():
         dbcv = f"{r.get('dbcv'):.3f}"        if r.get("dbcv")        is not None else "—"
         k    = str(r.get("n_clusters", "—"))
         noise = f"{r.get('noise_pct'):.1f}"  if r.get("noise_pct")   is not None else "—"
-        print(f"{label:<35} {sil:>6} {db:>6} {dbcv:>7} {k:>4} {noise:>7}")
+        tqdm.write(f"{label:<35} {sil:>6} {db:>6} {dbcv:>7} {k:>4} {noise:>7}")
 
     sent_sil = results.get("sentiment_only", {}).get("silhouette")
     v8_sil   = results.get("v8_baseline",    {}).get("silhouette")
     if sent_sil is not None and v8_sil is not None:
         delta = v8_sil - sent_sil
         pct   = 100 * delta / max(abs(sent_sil), 1e-6)
-        print(f"\n  Model vs sentiment-only Δsil = {delta:+.3f} ({pct:+.1f}%)")
+        tqdm.write(f"\n  Model vs sentiment-only Δsil = {delta:+.3f} ({pct:+.1f}%)")
         if abs(delta) < 0.05:
-            print("  WARNING: model barely exceeds sentiment-only baseline — "
-                  "cluster structure may be sentiment-driven.")
+            tqdm.write("  WARNING: model barely exceeds sentiment-only baseline — "
+                       "cluster structure may be sentiment-driven.")
         elif delta > 0.1:
-            print("  Model substantially outperforms sentiment baseline — "
-                  "structural signal is present beyond sentiment.")
+            tqdm.write("  Model substantially outperforms sentiment baseline — "
+                       "structural signal is present beyond sentiment.")
 
     # ── Save ───────────────────────────────────────────────────────────────
     out_path = rob_dir / "sentiment_robustness.json"
     out_path.write_text(json.dumps(results, indent=2))
-    print(f"\n[robustness] Results → {out_path}")
-
+    tqdm.write(f"\n[robustness] Results → {out_path}")
     _plot(results, rob_dir / "sentiment_robustness.png")
+    steps.update(1)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
