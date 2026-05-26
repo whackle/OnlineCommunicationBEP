@@ -23,8 +23,8 @@ ALL_STAGES: list[str] = [
     "explain",
     "hierarchical",
     "validate_hierarchical",
+    "ablation",
     # dropped stages — stubs exist but will not be run
-    # "ablation",
     # "downstream",
     # "stability",
 ]
@@ -43,6 +43,7 @@ STAGE_CHECKPOINTS: dict[str, str] = {
     "explain":              "explain/explanation_report.json",
     "hierarchical":            "hierarchical/hierarchical_results.json",
     "validate_hierarchical":   "validate_hierarchical/validation_report.json",
+    "ablation":                "ablation/ablation_results.json",
 }
 
 # Upstream dependency: each stage requires its upstream checkpoint to exist.
@@ -59,6 +60,7 @@ STAGE_DEPS: dict[str, str | None] = {
     "explain":              "evaluate",
     "hierarchical":            "cluster",
     "validate_hierarchical":   "hierarchical",
+    "ablation":                "build_pyg_dataset",
 }
 
 
