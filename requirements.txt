@@ -4,19 +4,23 @@
 #
 # CPU (dev):
 #   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-#   pip install torch-scatter torch-sparse torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
+#   pip install torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cpu.html
 #
 # GPU (VM, CUDA 12.4):
 #   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu124
-#   pip install torch-scatter torch-sparse torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cu124.html
+#   pip install torch-geometric -f https://data.pyg.org/whl/torch-2.10.0+cu124.html
 torch==2.10.0
 torch-geometric==2.7.0
 # torch-scatter and torch-sparse not required — PyG 2.4+ made them optional
+
+# Numerics
+numpy==2.4.3
 
 # Data
 duckdb==1.5.0
 pyarrow==23.0.1
 pandas==2.2.3
+h5py==3.16.0
 
 # Config + CLI
 pyyaml==6.0.2
@@ -27,9 +31,10 @@ hdbscan==0.8.40
 scikit-learn==1.6.1
 umap-learn==0.5.7
 
-# Visualisation + progress
+# Visualisation + graph utilities
 matplotlib==3.10.1
 seaborn==0.13.2
+networkx==3.6.1
 tqdm==4.67.1
 rich==14.0.0
 

@@ -11,7 +11,7 @@
 | **conflict_window_posts.parquet** | Extracted from tar (2.4 GB, 172M rows). Lean index: post_id, user_id, timestamp, repost_from, reposted_author, sent_label, sent_score. **No text field.** Used for fast reposter discovery in cascade construction |
 | **cascade_dataset.pt** | Built (159.8 MB). 39,983 cascades, 884,832 nodes, 844,849 edges, node feature dim=6. Stored in `outputs/build_pyg_dataset/` |
 | **Environment** | Python 3.14 venv, CPU-only PyTorch 2.10.0, PyG 2.7.0, all deps installed. See `requirements.txt` |
-| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`, `hierarchical`, `validate_hierarchical`. `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Stubs dropped: `ablation`, `downstream`, `stability` (out of scope). Stub remaining: `eda`. Prediction strength sub-step stubbed inside `validate_hierarchical`. |
+| **Pipeline** | Fully functional `run_pipeline.py` CLI + `config.yaml`. All stages implemented: `nlp_filter`, `cascade_construction`, `build_pyg_dataset`, `train`, `extract_embeddings`, `cluster`, `evaluate`, `explain`, `hierarchical`, `validate_hierarchical`, `ablation` (2026-05-26, 2³ factorial). `blueccgl/utils/mpl_compat.py` added for Python 3.14 matplotlib compatibility. Stubs dropped: `downstream`, `stability` (out of scope). Stub remaining: `eda`. Prediction strength sub-step stubbed inside `validate_hierarchical`. |
 | **Training v8** (primary) | DONE — 150 epochs on SSH VM, best epoch 147, loss 0.1292. Results in `Outputs_17_04/`. 11 clusters, 1.5% noise, silhouette=0.413, DBCV=+0.618 (10D UMAP space), follower R²=0.941. 79.6% aug fallback — reported as limitation |
 | **Training v9** (sensitivity) | DONE — 150 epochs on SSH VM (192.165.134.28), 18 clusters, 5.0% noise, aug fallback=42.2%. Results in `Outputs_18_04/`. Weaker follower R²=0.714 → v8 selected as primary |
 | **Disk** | ~15 GB free. Full tar extraction not feasible — streaming only |
@@ -57,7 +57,7 @@ OnlineCommunicationBEP/
 │   │   ├── explain.py           # --stage explain (XAI: probes, DiffPool assignments, cluster profiles, augmentation sensitivity)
 │   │   ├── hierarchical.py      # --stage hierarchical (Ward agglomerative on cluster centroids → macro-archetypes)
 │   │   ├── validate_hierarchical.py  # --stage validate_hierarchical (cophenetic, metric sweep, bootstrap ARI, UMAP seed ARI, prediction strength stub)
-│   │   ├── ablation.py          # --stage ablation [DROPPED — out of scope]
+│   │   ├── ablation.py          # --stage ablation — 2³ factorial grid (encoder × aug × sentiment)
 │   │   ├── downstream.py        # --stage downstream [DROPPED — out of scope]
 │   │   └── stability.py         # --stage stability [DROPPED — out of scope]
 │   │
@@ -116,8 +116,25 @@ OnlineCommunicationBEP/
 │   ├── train/
 │   ├── ...
 │
-├── scripts/                     # Ad-hoc exploration (legacy)
-│   └── eda_user_posts.py
+├── scripts/                     # Ad-hoc exploration and diagnostics
+│   ├── eda_user_posts.py
+│   ├── extract_conflict_window.py
+│   ├── quick_look.py
+│   ├── plot_training.py
+│   ├── diagnose_embeddings.py
+│   ├── compare_ablations.py         # Post-ablation metric comparison table
+│   ├── plot_ablation_interactions.py # Interaction effect plots (encoder × aug, etc.)
+│   ├── run_ablations.sh             # Shell wrapper for sequential ablation runs on VM
+│   └── sample_macro_cascades.py     # Sample representative cascades per macro-archetype
+│
+├── verification/                # Manual validation outputs
+│   ├── cascade_samples.csv      # Sample cascades for manual spot-check
+│   └── verification_report.md   # Summary of cascade construction validation
+│
+├── Outputs_ablation/            # Ablation variant outputs (partial — baseline only so far)
+│   ├── ablation_results.csv     # 2³ factorial metrics table (7 variants pending)
+│   ├── ablation_results.md      # Human-readable version
+│   └── figures/                 # Interaction effect plots (pre-computed from baseline)
 │
 ├── Docs/
 │   ├── IMPLEMENTATION_PLAN.md       # This document
@@ -777,18 +794,40 @@ Four fully implemented validation methods + one stub:
 
 **Key interpretation:** All four implemented methods validate the 5-macro solution. The bootstrap ARI=1.000 reflects that the 11 HDBSCAN centroids are well-separated enough that 20% cascade removal does not move any centroid far enough to change the Ward merge order. The UMAP seed variance (min ARI=0.775) is honest: the dominant archetype structure is seed-independent but ~8% of cascades near macro boundaries can be reassigned under different UMAP projections — the core of each archetype is stable, the boundaries are soft.
 
-### Step 4.7 — Ablation Stage (`blueccgl/stages/ablation.py`)
+### Step 4.7 — Ablation Stage (`blueccgl/stages/ablation.py`) — IMPLEMENTED 2026-05-26
 
 **Stage:** `--stage ablation`
-**Reads:** `{output_dir}/build_pyg_dataset/cascade_dataset.pt`
-**Writes:** `{output_dir}/ablation/{variant}/` (mirrors train → extract → cluster → evaluate outputs), `{output_dir}/ablation/comparison_table.csv`
+**Reads:** `{output_dir}/build_pyg_dataset/cascade_dataset.pt` (shared across all variants via symlink)
+**Writes:** `{output_dir}/ablation/{variant}/train/`, `extract_embeddings/`, `cluster/`, `evaluate/` (per variant), `{output_dir}/ablation/ablation_results.json` (stage checkpoint)
 
-For each ablation variant (A1–A5):
-1. Train with the variant's config override.
-2. Extract embeddings.
-3. Cluster.
-4. Evaluate.
-5. Collect metrics into a comparison table.
+**Design:** 2³ factorial grid — three binary factors, seven variants (baseline `rgcn_feed_sent` = `Outputs_17_04`):
+
+| Variant | Encoder | Augmentation | Sentiment |
+|---|---|---|---|
+| `gcn_feed_sent` | GCN | feed-aware | ✓ |
+| `rgcn_rand_sent` | R-GCN | random | ✓ |
+| `rgcn_feed_nosent` | R-GCN | feed-aware | ✗ |
+| `gcn_rand_sent` | GCN | random | ✓ |
+| `gcn_feed_nosent` | GCN | feed-aware | ✗ |
+| `rgcn_rand_nosent` | R-GCN | random | ✗ |
+| `gcn_rand_nosent` | GCN | random | ✗ |
+
+**Implementation details:**
+- Each variant gets its own output dir: `{output_dir}/ablation/{variant}/`
+- Dataset symlinked into `{variant_dir}/build_pyg_dataset/cascade_dataset.pt` — no data copy needed
+- Skip-if-done: checks for `{variant_dir}/evaluate/metrics.json` before running; fully resume-safe
+- Calls `train.run() → extract_embeddings.run() → cluster.run() → evaluate.run()` with variant config
+- Config overrides applied via `apply_overrides(copy.deepcopy(cfg), overrides)`
+- `aug_fallback_rate` read from training log and included in results table
+- Prints formatted comparison table on completion
+
+**Key confound to report:** Feed-aware variants will show ~79.6% aug fallback rate (Strategy C returns None for cascades with no NON_FOLLOWER edges); random-aug variants will show ~2–5%. This asymmetry must be reported explicitly alongside metrics in Table 4 of the thesis.
+
+**VM run command:**
+```bash
+python run_pipeline.py --config config.yaml --output-dir ./outputs --stage ablation --device cuda --seed 42
+```
+Only `outputs/build_pyg_dataset/cascade_dataset.pt` (159.8 MB) needs to be transferred to VM. Estimated runtime: ~7.5 hrs (7 variants × ~65 min/variant on same GPU as v8).
 
 ### Step 4.7 — Downstream Stage (`blueccgl/stages/downstream.py`)
 
@@ -957,17 +996,17 @@ Root cause: augmentations too weak; model solves pretext task via unchanged node
 | 31 | **Run `--stage cluster`** | DONE | UMAP 64D→10D + HDBSCAN. mcs=300 selected, 11 clusters, 1.5% noise, silhouette=0.362, mean persistence=0.395 |
 | 32 | **Run `--stage evaluate`** | DONE | Metrics computed in 10D UMAP space (fix 2026-04-18). v8: silhouette=0.413, DBCV=+0.618, DB=0.676, CH=1978. |
 | 33 | **Run `--stage explain`** | DONE | Probes, DiffPool assignments, cluster profiles (4 figures), augmentation sensitivity. Event heatmap KeyError fixed. matplotlib RecursionError fixed via mpl_compat.py. Probe log1p fix applied 2026-05-17 (wiener_index + cascade_size) |
-| 34 | **Implement + run `--stage ablation`** (A1–A5) | DROPPED | Out of scope — each variant requires a full GPU training run. Acknowledged as limitation in thesis |
+| 34 | **Implement + run `--stage ablation`** (2³ factorial) | DONE (impl 2026-05-26) / PENDING (VM runs) | Stage implemented as 2³ factorial grid: encoder (R-GCN vs GCN) × augmentation (feed-aware vs random) × sentiment (on vs off) = 7 variants. Baseline `rgcn_feed_sent` = `Outputs_17_04`. Remaining 7 variants to run on SSH VM (`cascade_dataset.pt` only needed). Results → `outputs/ablation/{variant}/`. See Step 4.7 for implementation details. |
 | 35 | **Implement + run `--stage downstream`** | DROPPED | Out of scope — follower_edge_ratio R²=0.941 already demonstrates embedding quality |
 | 36 | **Implement + run `--stage stability`** | DROPPED | Out of scope — v8 vs v9 sensitivity comparison serves as de-facto stability evidence |
 | 37 | **Implement + run `--stage hierarchical`** | DONE | Ward agglomerative on 11 cluster centroids (10D UMAP). 5 macro-archetypes (natural cut at merge distance 10.05). Outputs: dendrogram, heatmap (rank-normalised), macro profiles, UMAP, bubble chart, archetype_taxonomy.csv. Docs: `Docs/hierarchical_analysis.md` + `Docs/hierarchical_analysis.pdf`. Stage implemented and run 2026-05-21 |
 | 38 | **Implement + run `--stage validate_hierarchical`** | DONE | 4 validation methods + prediction strength stub. Cophenetic r=0.90, metric sweep all-agree k=5, bootstrap ARI=1.000, UMAP seed ARI=0.915±0.094. Full results in `Outputs_17_04/validate_hierarchical/validation_report.json`. Stage implemented and run 2026-05-21 |
 
-**v9 config changes (augmentation fallback fix, 2026-04-17):**
-Root cause: `follower_retain_ratio=0.3` × 7-node median cascade = 2.1 nodes, always below `min_nodes_after_aug=5` → 79.6% fallback to random augmentation.
-- `augmentation.follower_retain_ratio`: 0.3 → **0.4** (0.4×7=2.8, passes min=3)
-- `augmentation.temporal_prefix_ratio`: 0.3 → **0.5** (keep first half not first third)
-- `augmentation.min_nodes_after_aug`: 5 → **3** (5 caused fallback on median-7-node cascades)
+**v9 config changes (augmentation fallback reduction, 2026-04-17):**
+Root causes of 79.6% fallback (two mechanisms): (1) Strategy C returns `None` for cascades with no NON_FOLLOWER edges — given 75.9% FOLLOWER dominance, ~90% of cascades (especially near the 10-node median) are all-follower → C structurally ineligible; (2) Strategy A with aggressive retain_ratio disconnects the root in chain-like cascades → root_component returns singleton. OR fallback semantics amplify both: P(fallback) ≈ 2/3·(α+γ) where α≈0.5, γ≈0.9. Config changes:
+- `augmentation.follower_retain_ratio`: 0.3 → **0.4**
+- `augmentation.temporal_prefix_ratio`: 0.3 → **0.5**
+- `augmentation.min_nodes_after_aug`: 5 → **3**
 
 **Training v8 results summary (primary results — `Outputs_17_04/`):**
 
@@ -1045,12 +1084,14 @@ v8 selected as primary result due to stronger embedding quality (follower R²=0.
 18. **Hierarchical stage as separate pipeline stage (2026-05-21):** Ward agglomerative clustering on HDBSCAN cluster centroids (computed in 10D UMAP space) added as `--stage hierarchical`. Depends only on `--stage cluster`. Natural cut via largest-gap in linkage merge distances; `n_macro` clamped [2,6]. 5-macro solution selected at cut height 10.05 — singleton C6 (Macro 5) retained deliberately as it represents a structurally distinct scaled-up intra-network spreading regime (high follower ratio, large breadth) separable from the smaller follower-driven neutral cascades in Macro 3. The out-of-network diffusion archetype is C8 (Macro 1), not C6.
 19. **Rank normalisation for hierarchical heatmap (2026-05-21):** Min-max normalisation produced multiple cells showing 1.00 for the same property (ties when several clusters share the same median value). Switched to `scipy.stats.rankdata` rank normalisation: cell value = `(rank − 1) / (n_clusters − 1)`, giving strictly ordered values with no spurious ties across clusters.
 20. **"Out-of-network diffusion" replaces "algorithmic amplification" (2026-05-21):** The original framing attributed non-follower edge propagation to platform algorithmic amplification — a causal claim not supportable from follower-graph data alone (temporal confound; non-follower edges conflate search, second-order reposts, hashtag discovery, and feed surfacing). Replaced throughout with "out-of-network diffusion" (structural, mechanism-agnostic) grounded in Granovetter (1973) weak-tie bridging. C8 (follower ratio 0.52, depth 5) is the out-of-network diffusion archetype; C6 (follower ratio 0.875) is scaled-up intra-network spreading. Old planning docs (`Initial_Plan.md`, `Project_Plan_Draft.md`, `Palestine_Bluesky_Project_Plan.md`, `latex/main.tex`, `latex/palestine_plan.tex`) marked DEPRECATED.
+22. **Ablation redesigned from A1–A5 to 2³ factorial (2026-05-26):** Original plan described five independent ablations (A1: no edge-type, A2: generic aug, A3: flat pool, A4: no sentiment, A5: random init). Replaced with a 2³ factorial grid that orthogonally isolates three binary factors (R-GCN vs GCN, feed-aware vs random aug, sentiment on vs off). This enables main-effect and interaction-effect estimation, which is more informative for a thesis table than five independent point comparisons. DiffPool is already disabled in v8 (`pool=mean`), so A3 (flat pool) is vacuous and dropped. A5 (random init) is dropped — the downstream probe R²=0.941 already demonstrates that learned representations are non-random without a separate untrained baseline. The 2³ design preserves the three most thesis-relevant factors.
+
 21. **`--stage validate_hierarchical` as a separate post-hierarchical stage (2026-05-21):** Four validation methods (cophenetic correlation, multi-cut metric sweep, bootstrap ARI, UMAP seed ARI) implemented as `blueccgl/stages/validate_hierarchical.py`. Prediction strength (Tibshirani & Walther 2005) stubbed with full algorithm in docstring. Depends on `--stage hierarchical`. All four methods validate the 5-macro solution; see Step 4.6 for full results.
 
 ## Key Decisions Still Open
 
 1. **DiffPool vs. SAGPool:** DiffPool completed training successfully (max_nodes=150). No instability observed. Decision: keep DiffPool.
-2. **Ablation training time budget:** Each A1–A5 variant requires a full training run on SSH VM. Consider reducing epochs to 75 for ablations to limit wall-clock time.
+2. **Ablation training time budget:** RESOLVED — 2³ factorial design implemented (7 variants, ~7.5 hrs on GPU). Uses same 150-epoch schedule as baseline. Variants pending VM run. See Step 4.7.
 3. **Explain stage optional extensions:** Core 4 sub-steps done. Optional extensions (GNNExplainer, PGExplainer, TCAV) depend on remaining time budget. TCAV has highest thesis novelty but requires concept set curation (~6h). Decision deferred.
 4. **event_window not captured in embeddings:** Probes show balanced accuracy = 0.143 (chance) — model does not discriminate between events. This limits SRQ1/SRQ2 answers. Options: (a) accept as limitation, (b) add event-aware contrastive loss, (c) use cluster × event cross-tabulation from cluster profiles instead.
 5. **v9 completed (2026-04-18):** v9 run on VM 192.165.134.28, 18 clusters, 42.2% fallback. Decided to use v8 as primary result (follower R²=0.941 > v9's 0.714). v9 reported as sensitivity analysis. No further retraining planned.
@@ -1072,3 +1113,4 @@ v8 selected as primary result due to stronger embedding quality (follower R²=0.
 11. **`hierarchical.py` — HDF5 KeyError on `"umap_embeddings"` key:** Stage was reading `f["umap_embeddings"][:]` but `cluster/umap_embeddings_cluster.h5` stores embeddings under key `"embeddings"`. Fixed to `f["embeddings"][:]`. Fixed 2026-05-21.
 12. **`hierarchical.py` — macro profile bar chart showing negative lower bounds:** Bar chart used mean ± std for cascade_size. Since std > mean for most clusters (right-skewed distribution), the lower error bar goes negative (impossible for a count). Fixed by switching to median + IQR with asymmetric error bars (`err_lo = median − q25`, `err_hi = q75 − median`). Fixed 2026-05-21.
 13. **`hierarchical.py` — heatmap showed raw median values alongside normalised colorbar:** Cell annotations showed raw values (e.g., 13, 16) while the colorbar represented normalised scale — inconsistent. Fixed by storing normalised values in the cell array and displaying those in annotations; colorbar removed entirely. Fixed 2026-05-21.
+14. **`ablation.py` — stub replaced with 2³ factorial implementation (2026-05-26):** Stage was `raise NotImplementedError()`. Implemented as full 2³ factorial grid (encoder × aug × sentiment, 7 variants). Dataset symlinked per-variant to avoid 159.8 MB copies. Resume-safe via `evaluate/metrics.json` checkpoint check. `pipeline.py` updated: `"ablation"` added to `ALL_STAGES`, `STAGE_CHECKPOINTS`, `STAGE_DEPS`. `run_pipeline.py` `_run_stage()` dispatcher updated.

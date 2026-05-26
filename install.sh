@@ -34,9 +34,11 @@ pip install torch-geometric
 # Step 4: everything else
 echo "[install] Installing remaining dependencies..."
 pip install \
+    numpy==2.4.3 \
     duckdb==1.5.0 \
     pyarrow==23.0.1 \
     pandas==2.2.3 \
+    h5py==3.16.0 \
     pyyaml==6.0.2 \
     click==8.1.8 \
     hdbscan==0.8.40 \
@@ -44,11 +46,10 @@ pip install \
     umap-learn==0.5.7 \
     matplotlib==3.10.1 \
     seaborn==0.13.2 \
+    networkx==3.6.1 \
     tqdm==4.67.1 \
     rich==14.0.0 \
     scipy==1.15.3 \
-    h5py==3.16.0 \
-    networkx==3.6.1 \
     pytest==8.3.5
 
 echo "[install] Done. torch==${TORCH_VER}+${WHEEL}"
