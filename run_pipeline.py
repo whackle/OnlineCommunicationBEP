@@ -59,11 +59,17 @@ def main(config_path, output_dir, stages, dry_run, resume, seed, ablation, devic
             if "=" not in kv:
                 raise click.BadParameter(f"Override must be KEY=VALUE, got: {kv}")
             k, v = kv.split("=", 1)
-            # Attempt type cast: bool → int → float → str
+            # Attempt type cast: bool → list → int → float → str
             if v.lower() == "true":
                 v = True
             elif v.lower() == "false":
                 v = False
+            elif v.startswith("[") and v.endswith("]"):
+                import ast
+                try:
+                    v = ast.literal_eval(v)
+                except (ValueError, SyntaxError):
+                    pass
             else:
                 try:
                     v = int(v)
