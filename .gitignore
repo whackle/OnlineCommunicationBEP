@@ -4,7 +4,8 @@ Data/
 # Pipeline outputs
 outputs/
 outputs_VM/
-Outputs_17_04
+Outputs_17_04/
+outputs_no_sentiment
 # Python
 __pycache__/
 *.py[cod]
