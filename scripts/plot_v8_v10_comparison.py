@@ -1,5 +1,5 @@
 """
-Generate three v8 vs v10 comparison figures for thesis §4.8.1.
+Generate three full-model run vs no-sentiment run comparison figures for thesis §4.8.1.
 
 Outputs (saved to outputs_no_sentiment/figures/):
   - probe_comparison.png      : grouped horizontal bar chart of structural probe R²
@@ -70,9 +70,9 @@ def plot_probe_comparison():
     bar_h = 0.36
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.barh(y + bar_h / 2, v8_vals, bar_h, label="v8 (with sentiment)",
+    ax.barh(y + bar_h / 2, v8_vals, bar_h, label="Full-model run (with sentiment)",
             color=V8_COLOUR, alpha=0.85)
-    ax.barh(y - bar_h / 2, v10_vals, bar_h, label="v10 (no sentiment)",
+    ax.barh(y - bar_h / 2, v10_vals, bar_h, label="No-sentiment run",
             color=V10_COLOUR, alpha=0.85)
 
     ax.set_yticks(y)
@@ -91,7 +91,7 @@ def plot_probe_comparison():
                 fontsize=8, color=V10_COLOUR)
 
     ax.legend(loc="lower right", fontsize=9)
-    ax.set_title("Structural probe R²: v8 vs v10", fontsize=11, pad=8)
+    ax.set_title("Structural probe R²: full-model run vs no-sentiment run", fontsize=11, pad=8)
     fig.tight_layout()
     out_path = OUT_DIR / "probe_comparison.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -137,8 +137,8 @@ def plot_umap_macro_comparison():
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     for ax, df, palette, names, title in [
-        (axes[0], v8_df, v8_palette, v8_names, "v8 — 5 macro-archetypes (with sentiment)"),
-        (axes[1], v10_df, v10_palette, v10_names, "v10 — 2 macro-archetypes (no sentiment)"),
+        (axes[0], v8_df, v8_palette, v8_names, "Full-model run — 5 macro-archetypes (with sentiment)"),
+        (axes[1], v10_df, v10_palette, v10_names, "No-sentiment run — 2 macro-archetypes"),
     ]:
         # plot noise first (background)
         noise = df[df.macro_id == -1]
@@ -164,7 +164,7 @@ def plot_umap_macro_comparison():
         ax.legend(handles=handles, loc="upper right", fontsize=7.5,
                   markerscale=4, framealpha=0.8)
 
-    fig.suptitle("UMAP embedding coloured by macro-archetype: v8 vs v10",
+    fig.suptitle("UMAP embedding coloured by macro-archetype: full-model run vs no-sentiment run",
                  fontsize=11, y=1.01)
     fig.tight_layout()
     out_path = OUT_DIR / "umap_macro_comparison.png"
@@ -216,8 +216,8 @@ def plot_macro_sentiment_comparison():
 
     total_v8 = v8["n"].sum()
     total_v10 = v10["n"].sum()
-    v8["label"] = v8.apply(lambda r: f"v8 M{r.macro_id}\n({100*r.n/total_v8:.0f}%)", axis=1)
-    v10["label"] = v10.apply(lambda r: f"v10 M{r.macro_id}\n({100*r.n/total_v10:.0f}%)", axis=1)
+    v8["label"] = v8.apply(lambda r: f"Full-model M{r.macro_id}\n({100*r.n/total_v8:.0f}%)", axis=1)
+    v10["label"] = v10.apply(lambda r: f"No-sent M{r.macro_id}\n({100*r.n/total_v10:.0f}%)", axis=1)
 
     all_labels = list(v8["label"]) + list(v10["label"])
     neg_vals = list(v8["neg"]) + list(v10["neg"])
@@ -237,11 +237,11 @@ def plot_macro_sentiment_comparison():
                    bottom=[n + u for n, u in zip(neg_vals, neu_vals)],
                    label="Positive", color=POS_C, alpha=0.85)
 
-    # divider between v8 and v10
+    # divider between full-model and no-sentiment
     ax.axvline(n_v8 - 0.5, color="black", linewidth=1.2, linestyle="--")
-    ax.text(n_v8 / 2 - 0.5, 1.06, "v8  (5 macros)", ha="center",
+    ax.text(n_v8 / 2 - 0.5, 1.06, "Full-model run  (5 macros)", ha="center",
             fontsize=10, fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.text(n_v8 + len(v10) / 2 - 0.5, 1.06, "v10  (2 macros)", ha="center",
+    ax.text(n_v8 + len(v10) / 2 - 0.5, 1.06, "No-sentiment run  (2 macros)", ha="center",
             fontsize=10, fontweight="bold", transform=ax.get_xaxis_transform())
 
     ax.set_xticks(x)
@@ -251,7 +251,7 @@ def plot_macro_sentiment_comparison():
     ax.yaxis.grid(True, linestyle="--", alpha=0.4)
     ax.set_axisbelow(True)
     ax.legend(loc="upper right", fontsize=9)
-    ax.set_title("Macro-archetype sentiment composition: v8 vs v10", fontsize=11, pad=18)
+    ax.set_title("Macro-archetype sentiment composition: full-model run vs no-sentiment run", fontsize=11, pad=18)
 
     fig.tight_layout()
     out_path = OUT_DIR / "macro_sentiment_comparison.png"
@@ -263,7 +263,7 @@ def plot_macro_sentiment_comparison():
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Generating v8 vs v10 comparison figures...")
+    print("Generating full-model run vs no-sentiment run comparison figures...")
     plot_probe_comparison()
     plot_umap_macro_comparison()
     plot_macro_sentiment_comparison()
