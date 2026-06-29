@@ -1,8 +1,8 @@
 data:
-  raw_dir: ./Data/raw
-  sample_dir: ./Data/user_posts       # for dev work before full download
+  raw_dir: ../Data/raw
+  sample_dir: ../Data/user_posts       # for dev work before full download
   conflict_window: ["2023-10-01", "2024-03-18"]
-  conflict_window_parquet: ./Data/conflict_window_posts.parquet  # pre-extracted from tar
+  conflict_window_parquet: ../Data/conflict_window_posts.parquet  # pre-extracted from tar
   cascade_min_size: 10                # adjusted empirically; fallback to 5
   cascade_max_size: 10000
 
@@ -16,7 +16,7 @@ nlp_filter:
 cascade:
   parent_priority: [follower, temporal, root]
   edge_types: {FOLLOWER: 0, NON_FOLLOWER: 1, UNKNOWN: 2}
-  follower_db_path: ./Data/followers.duckdb   # pre-built DuckDB from followers.csv.gz
+  follower_db_path: ../Data/followers.duckdb   # pre-built DuckDB from followers.csv.gz
 
 model:
   encoder: rgcn                       # options: rgcn | gcn (ablation A1)
